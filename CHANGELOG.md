@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-17
+
+### Changed
+- **libsignal**: Updated all five libsignal dependencies (`libsignal-protocol`, `libsignal-core`, `signal-crypto`, `zkgroup`, `zkcredential`) from tag `v0.93.1` to `main` @ [`b5121d0`](https://github.com/signalapp/libsignal/commit/b5121d07c72f9e631f178d907ca892587f64f9e2) (2026-07-16, upstream workspace version 0.97.4).
+  - Covers ~60 upstream commits, including the session/state/storage refactor (`session.rs` split into `session_management.rs`, `state/`, `storage/`), dynamic `InvalidMessage` error descriptions, removal of `SignalMessage.verifyMac`, the ML-KEM parameter key-type fix, and SPQR integration.
+  - New transitive dependency: `spqr` v1.5.1 (Sparse Post-Quantum Ratchet), pulled in by `libsignal-protocol`.
+  - **No changes to `src/lib.rs` were required** — every libsignal API used by the wrapper remained source-compatible, and the public JavaScript/WASM API is unchanged.
+- **Dependencies**: Bumped all crates within semver-compatible ranges (`cargo update`), notably `wasm-bindgen` 0.2.106 → 0.2.126, `uuid` 1.19 → 1.24, `zeroize` 1.8 → 1.9, `prost` 0.14.3 → 0.14.4, `rand` 0.9.4 → 0.9.5.
+
+### Notes
+- The getrandom "diamond dependency" (v0.2 + v0.3) is **still required** after the update: `getrandom` 0.2 (feature `js`) is pulled in by `rand_core` 0.6 consumers (`curve25519-dalek` 4.1.3, `x25519-dalek`, `password-hash`, `aes-gcm-siv` 0.11.1 via `crypto-common`), while `getrandom` 0.3 (feature `wasm_js`) serves `rand` 0.9 users (`libsignal-core`, `uuid`). Both pins remain in `Cargo.toml`.
+- Verified with `cargo build` (host), `cargo build --target wasm32-unknown-unknown --release`, `cargo clippy --target wasm32-unknown-unknown` (no new warnings), and `wasm-pack test --headless --chrome` (all tests passing).
+
 ## [0.2.0] - 2026-05-03
 
 ### Removed
@@ -120,7 +133,9 @@ const ciphertext = await encryptMessage(plaintext, recipientAddress, localAddres
 - State persistence for IndexedDB
 - Complete TypeScript definitions
 
-[Unreleased]: https://github.com/getmaapp/signal-wasm/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/getmaapp/signal-wasm/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/getmaapp/signal-wasm/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/getmaapp/signal-wasm/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/getmaapp/signal-wasm/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/getmaapp/signal-wasm/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/getmaapp/signal-wasm/releases/tag/v0.1.0
