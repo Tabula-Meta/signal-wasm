@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-17
+
+Security hardening release. libsignal remains
+pinned to `main` @ [`b5121d0`](https://github.com/signalapp/libsignal/commit/b5121d07c72f9e631f178d907ca892587f64f9e2) — no vendored code changed.
+
+### Removed
+- **BREAKING**: The internal `map_group_id` derivation (UUIDv5 hash of arbitrary
+  group strings) is gone, with **no fallback**. Distribution ids were keyed in a
+  second, incompatible namespace while callers minted their own UUIDs, so
+  exports/hydration/decrypt could never line up. All
+  `distributionId` parameters must now be **caller-minted UUID strings**;
+  anything else is rejected with a `Generic`-coded validation error. Affected
+  bindings (signatures unchanged, semantics tightened):
+  - `createSenderKeyDistribution(localAddress, distributionId, senderKeyStore)`
+  - `encryptGroupMessage(localAddress, distributionId, plaintext, senderKeyStore)`
+  - `InMemSenderKeyStore.export_sender_key(address, distributionId)`
+  - `InMemSenderKeyStore.import_sender_key(address, distributionId, bytes)`
+  - `processSenderKeyDistribution` and `decryptGroupMessage` never derived an
+    id (it is read from the SKDM / embedded in the ciphertext respectively) and
+    are unchanged.
+- **BREAKING (minor)**: Thrown errors are now real JS `Error` objects instead of
+  bare strings. `err.message` is byte-identical to the old string, but
+  `String(err)` now yields `"Error: SignalError: …"` (standard `Error`
+  stringification). Catch sites reading `.message` are unaffected; catch sites
+  doing `String(err)` will see the `"Error: "` prefix.
+- Dropped the `uuid` crate's `v5` feature and the `hex` dev-dependency (both
+  were only used by `map_group_id` / its test).
+
+### Added
+- **`remove_sender_key(address, distributionId)`** on `InMemSenderKeyStore`:
+  deletes the sender-key record for `(address, distributionId)`,
+  returning `true` when a record was actually removed. Rotation must delete the
+  record before re-creating the distribution — otherwise
+  `createSenderKeyDistribution` reuses the existing chain and removed group
+  members keep deriving future message keys (canonical clients do the same:
+  Signal-Desktop `sendToGroup.preload.ts:865-868`). Deletion is provable via
+  `export_sender_key` returning `None` afterwards; covered by tests.
+- **Structured error codes**: every thrown error carries a stable
+  own `code` property, matched on the libsignal error **type** (never the
+  message string) so it survives release-build message flattening:
+  `NoSenderKeyState`, `DuplicatedMessage`, `UntrustedIdentity`,
+  `InvalidKyberPreKeyId`, and `Generic` for everything else (including
+  wrapper-side validation failures). The `message` string itself is unchanged:
+  detailed in debug builds, flattened to `"SignalError: Operation failed"` in
+  release builds.
+
+### Changed
+- `WasmInMemSenderKeyStore` is now backed by the wrapper's own `SenderKeyStore`
+  trait implementation over a `HashMap` (`RemovableSenderKeyStore`) instead of
+  upstream's `InMemSenderKeyStore`, whose map is private and offers no removal
+  API (`rust/protocol/src/storage/inmem.rs:330`; the trait itself is only
+  `store_sender_key` + `load_sender_key`, `rust/protocol/src/storage/traits.rs:164`).
+  Behaviour of store/load is identical to upstream (same `Cow`-keyed map).
+- New internal dependency: `async-trait` 0.1 (same version libsignal pins).
+
+### Tests
+- Group round-trip with a caller-minted distribution id:
+  create → export → fresh store → import → encrypt on one store / decrypt on
+  the other.
+- Decrypt with the wrong distribution id fails with `NoSenderKeyState`.
+- Decrypt on a store that never saw the SKDM fails with `NoSenderKeyState`.
+- `remove_sender_key` → export returns `None`; remove + re-create produces
+  **different** key material; the rotated distribution still round-trips.
+- Non-UUID distribution ids are rejected (`Generic` code).
+- All 17 tests pass under `wasm-pack test --headless --chrome`; `cargo clippy
+  --target wasm32-unknown-unknown` is clean.
+
 ## [0.3.0] - 2026-07-17
 
 ### Changed
@@ -133,7 +200,8 @@ const ciphertext = await encryptMessage(plaintext, recipientAddress, localAddres
 - State persistence for IndexedDB
 - Complete TypeScript definitions
 
-[Unreleased]: https://github.com/getmaapp/signal-wasm/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/getmaapp/signal-wasm/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/getmaapp/signal-wasm/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/getmaapp/signal-wasm/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/getmaapp/signal-wasm/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/getmaapp/signal-wasm/compare/v0.1.1...v0.1.2

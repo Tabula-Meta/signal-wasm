@@ -9,6 +9,7 @@
 
 extern crate wasm_bindgen_test;
 use signal_wasm::*;
+use wasm_bindgen::JsValue;
 use wasm_bindgen_test::*;
 
 wasm_bindgen_test_configure!(run_in_browser);
@@ -19,6 +20,27 @@ fn create_test_identity() -> (WasmIdentityKeyPair, u32) {
     let identity_key_pair = WasmIdentityKeyPair::new(&public_key, &private_key);
     let registration_id = generate_registration_id();
     (identity_key_pair, registration_id)
+}
+
+/// Mint a caller-supplied distribution id (UUID string), as the TS domain does.
+fn mint_distribution_id() -> String {
+    uuid_to_string(&generate_uuid()).expect("Failed to mint distribution id")
+}
+
+/// Read the stable `code` property attached to a thrown JS error.
+fn js_error_code(err: &JsValue) -> String {
+    js_sys::Reflect::get(err, &JsValue::from_str("code"))
+        .ok()
+        .and_then(|v| v.as_string())
+        .unwrap_or_default()
+}
+
+/// Read the `message` property of a thrown JS error.
+fn js_error_message(err: &JsValue) -> String {
+    js_sys::Reflect::get(err, &JsValue::from_str("message"))
+        .ok()
+        .and_then(|v| v.as_string())
+        .unwrap_or_default()
 }
 
 #[wasm_bindgen_test]
@@ -215,7 +237,8 @@ async fn test_session_establishment_and_messaging() {
 async fn test_group_messaging() {
     let alice_uuid = "00000000-0000-0000-0000-00000000000A";
     let bob_uuid = "00000000-0000-0000-0000-00000000000B";
-    let group_id_str = hex::encode("000102030405060708090a0b0c0d0e0f");
+    // Caller-minted distribution id (must be a UUID string since 0.4.0).
+    let distribution_id = uuid_to_string(&generate_uuid()).expect("Failed to mint distribution id");
 
     let (_alice_identity, _alice_reg_id) = create_test_identity();
     let mut alice_sender_key_store = WasmInMemSenderKeyStore::new();
@@ -228,7 +251,7 @@ async fn test_group_messaging() {
     // 1. Alice Creates Group (SenderKeyDistribution)
     let dist_msg = create_sender_key_distribution(
         &alice_address,
-        group_id_str.clone(),
+        distribution_id.clone(),
         &mut alice_sender_key_store,
     )
     .await
@@ -247,7 +270,7 @@ async fn test_group_messaging() {
     let plaintext = b"Group Hello";
     let group_cipher = encrypt_group_message(
         &alice_address,
-        group_id_str.clone(),
+        distribution_id.clone(),
         plaintext,
         &mut alice_sender_key_store,
     )
@@ -264,6 +287,267 @@ async fn test_group_messaging() {
     .expect("Group decryption failed");
 
     assert_eq!(decrypted, plaintext);
+}
+
+#[wasm_bindgen_test]
+async fn test_group_roundtrip_caller_minted_distribution_id() {
+    let alice_uuid = "00000000-0000-0000-0000-00000000000A";
+    let mut alice_sender_key_store = WasmInMemSenderKeyStore::new();
+    let alice_address = WasmProtocolAddress::new(alice_uuid.to_string(), 1).unwrap();
+
+    // Caller-minted distribution id, threaded end-to-end.
+    let distribution_id = mint_distribution_id();
+
+    // 1. Alice creates the distribution under the caller-minted id.
+    create_sender_key_distribution(
+        &alice_address,
+        distribution_id.clone(),
+        &mut alice_sender_key_store,
+    )
+    .await
+    .expect("Failed to create sender key distribution");
+
+    // 2. Export the record and hydrate a fresh store (persistence path).
+    let exported = alice_sender_key_store
+        .export_sender_key(&alice_address, distribution_id.clone())
+        .await
+        .expect("Failed to export sender key")
+        .expect("Sender key missing after create");
+
+    let mut restored_sender_key_store = WasmInMemSenderKeyStore::new();
+    restored_sender_key_store
+        .import_sender_key(&alice_address, distribution_id.clone(), &exported)
+        .await
+        .expect("Failed to import sender key");
+
+    // 3. Encrypt on Alice's store, decrypt on the restored store.
+    let plaintext = b"Hydrated group round-trip";
+    let ciphertext = encrypt_group_message(
+        &alice_address,
+        distribution_id.clone(),
+        plaintext,
+        &mut alice_sender_key_store,
+    )
+    .await
+    .expect("Group encryption failed");
+
+    let decrypted = decrypt_group_message(
+        &alice_address,
+        &ciphertext,
+        &mut restored_sender_key_store,
+    )
+    .await
+    .expect("Group decryption on restored store failed");
+
+    assert_eq!(decrypted, plaintext);
+}
+
+#[wasm_bindgen_test]
+async fn test_group_decrypt_wrong_distribution_id_fails() {
+    let alice_uuid = "00000000-0000-0000-0000-00000000000A";
+    let mut alice_sender_key_store = WasmInMemSenderKeyStore::new();
+    let alice_address = WasmProtocolAddress::new(alice_uuid.to_string(), 1).unwrap();
+    let mut bob_sender_key_store = WasmInMemSenderKeyStore::new();
+
+    let known_distribution_id = mint_distribution_id();
+    let unknown_distribution_id = mint_distribution_id();
+
+    // Bob knows only `known_distribution_id`.
+    let dist_msg = create_sender_key_distribution(
+        &alice_address,
+        known_distribution_id.clone(),
+        &mut alice_sender_key_store,
+    )
+    .await
+    .expect("Failed to create sender key distribution");
+    process_sender_key_distribution(
+        &alice_address,
+        &dist_msg,
+        &mut bob_sender_key_store,
+    )
+    .await
+    .expect("Bob failed to process distribution");
+
+    // Alice encrypts under a different distribution id; the ciphertext
+    // therefore embeds an id Bob has no record for.
+    create_sender_key_distribution(
+        &alice_address,
+        unknown_distribution_id.clone(),
+        &mut alice_sender_key_store,
+    )
+    .await
+    .expect("Failed to create second distribution");
+    let ciphertext = encrypt_group_message(
+        &alice_address,
+        unknown_distribution_id.clone(),
+        b"Wrong id",
+        &mut alice_sender_key_store,
+    )
+    .await
+    .expect("Group encryption failed");
+
+    let err = decrypt_group_message(
+        &alice_address,
+        &ciphertext,
+        &mut bob_sender_key_store,
+    )
+    .await
+    .expect_err("Decryption with the wrong distribution id must fail");
+
+    assert_eq!(js_error_code(&err), "NoSenderKeyState");
+    assert!(js_error_message(&err).starts_with("SignalError:"));
+}
+
+#[wasm_bindgen_test]
+async fn test_remove_sender_key_rotates_key_material() {
+    let alice_uuid = "00000000-0000-0000-0000-00000000000A";
+    let mut alice_sender_key_store = WasmInMemSenderKeyStore::new();
+    let alice_address = WasmProtocolAddress::new(alice_uuid.to_string(), 1).unwrap();
+    let distribution_id = mint_distribution_id();
+
+    // 1. Create and export the original key material.
+    create_sender_key_distribution(
+        &alice_address,
+        distribution_id.clone(),
+        &mut alice_sender_key_store,
+    )
+    .await
+    .expect("Failed to create sender key distribution");
+    let original = alice_sender_key_store
+        .export_sender_key(&alice_address, distribution_id.clone())
+        .await
+        .expect("Failed to export sender key")
+        .expect("Sender key missing after create");
+
+    // 2. Remove: export must then return None, and a second remove is a no-op.
+    let removed = alice_sender_key_store
+        .remove_sender_key(&alice_address, distribution_id.clone())
+        .await
+        .expect("Failed to remove sender key");
+    assert!(removed, "remove_sender_key should report a removed record");
+
+    let after_remove = alice_sender_key_store
+        .export_sender_key(&alice_address, distribution_id.clone())
+        .await
+        .expect("Failed to export after remove");
+    assert!(after_remove.is_none(), "export after remove must be None");
+
+    let removed_again = alice_sender_key_store
+        .remove_sender_key(&alice_address, distribution_id.clone())
+        .await
+        .expect("Second remove failed");
+    assert!(!removed_again, "second remove_sender_key should report no record");
+
+    // 3. Re-create under the same distribution id: fresh key material.
+    let new_dist_msg = create_sender_key_distribution(
+        &alice_address,
+        distribution_id.clone(),
+        &mut alice_sender_key_store,
+    )
+    .await
+    .expect("Failed to re-create distribution");
+    let rotated = alice_sender_key_store
+        .export_sender_key(&alice_address, distribution_id.clone())
+        .await
+        .expect("Failed to export rotated sender key")
+        .expect("Sender key missing after re-create");
+
+    assert_ne!(
+        original, rotated,
+        "remove + re-create must produce fresh key material"
+    );
+
+    // 4. The rotated distribution is fully functional.
+    let mut bob_sender_key_store = WasmInMemSenderKeyStore::new();
+    process_sender_key_distribution(
+        &alice_address,
+        &new_dist_msg,
+        &mut bob_sender_key_store,
+    )
+    .await
+    .expect("Bob failed to process rotated distribution");
+
+    let plaintext = b"Post-rotation message";
+    let ciphertext = encrypt_group_message(
+        &alice_address,
+        distribution_id.clone(),
+        plaintext,
+        &mut alice_sender_key_store,
+    )
+    .await
+    .expect("Post-rotation encryption failed");
+    let decrypted = decrypt_group_message(
+        &alice_address,
+        &ciphertext,
+        &mut bob_sender_key_store,
+    )
+    .await
+    .expect("Post-rotation decryption failed");
+    assert_eq!(decrypted, plaintext);
+}
+
+#[wasm_bindgen_test]
+async fn test_group_decrypt_unknown_distribution_error_code() {
+    let alice_uuid = "00000000-0000-0000-0000-00000000000A";
+    let mut alice_sender_key_store = WasmInMemSenderKeyStore::new();
+    let alice_address = WasmProtocolAddress::new(alice_uuid.to_string(), 1).unwrap();
+    let distribution_id = mint_distribution_id();
+
+    create_sender_key_distribution(
+        &alice_address,
+        distribution_id.clone(),
+        &mut alice_sender_key_store,
+    )
+    .await
+    .expect("Failed to create sender key distribution");
+    let ciphertext = encrypt_group_message(
+        &alice_address,
+        distribution_id.clone(),
+        b"Unknown to Bob",
+        &mut alice_sender_key_store,
+    )
+    .await
+    .expect("Group encryption failed");
+
+    // Bob never processed any SKDM, so the record lookup misses.
+    let mut fresh_sender_key_store = WasmInMemSenderKeyStore::new();
+    let err = decrypt_group_message(
+        &alice_address,
+        &ciphertext,
+        &mut fresh_sender_key_store,
+    )
+    .await
+    .expect_err("Decryption with an unknown distribution id must fail");
+
+    assert_eq!(js_error_code(&err), "NoSenderKeyState");
+    assert!(js_error_message(&err).starts_with("SignalError:"));
+}
+
+#[wasm_bindgen_test]
+async fn test_group_rejects_non_uuid_distribution_id() {
+    let alice_uuid = "00000000-0000-0000-0000-00000000000A";
+    let alice_address = WasmProtocolAddress::new(alice_uuid.to_string(), 1).unwrap();
+    let mut sender_key_store = WasmInMemSenderKeyStore::new();
+
+    // The pre-0.4.0 hash path is gone: arbitrary group strings are rejected.
+    let err = create_sender_key_distribution(
+        &alice_address,
+        "team:general-chat-1".to_string(),
+        &mut sender_key_store,
+    )
+    .await
+    .expect_err("Non-UUID distribution id must be rejected");
+    assert_eq!(js_error_code(&err), "Generic");
+
+    let err = encrypt_group_message(
+        &alice_address,
+        "not-a-uuid".to_string(),
+        b"x",
+        &mut sender_key_store,
+    )
+    .await
+    .expect_err("Non-UUID distribution id must be rejected");
+    assert_eq!(js_error_code(&err), "Generic");
 }
 
 #[wasm_bindgen_test]

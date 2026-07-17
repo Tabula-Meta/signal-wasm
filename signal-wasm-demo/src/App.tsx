@@ -684,7 +684,10 @@ function App() {
   const createGroupSession = async () => {
     if (!client) return;
     try {
-      const groupDistId = "team:general-chat-1";
+      // Distribution ids must be caller-minted UUID strings since 0.4.0
+      // (the wrapper no longer hashes arbitrary group ids). Fixed here so
+      // persisted records in IndexedDB survive reloads.
+      const groupDistId = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
       const aliceAddress = ProtocolAddress.new(client.uuid, client.deviceId);
 
       const skdm = await createSenderKeyDistribution(

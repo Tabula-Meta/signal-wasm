@@ -13,6 +13,10 @@
 #![deny(unsafe_code)]
 #![warn(clippy::unwrap_used)]
 
+use std::borrow::Cow;
+use std::collections::HashMap;
+
+use async_trait::async_trait;
 use zkgroup::groups::{GroupMasterKey, GroupSecretParams};
 use zkgroup::GroupIdentifierBytes;
 
@@ -37,7 +41,6 @@ use libsignal_protocol::{
     InMemIdentityKeyStore,
     InMemKyberPreKeyStore,
     InMemPreKeyStore,
-    InMemSenderKeyStore,
     InMemSessionStore,
     InMemSignedPreKeyStore,
     KeyPair,
@@ -56,6 +59,7 @@ use libsignal_protocol::{
     SessionRecord,
     SessionStore,
     SignalMessage,
+    SignalProtocolError,
     SignedPreKeyRecord,
     SignedPreKeyStore,
     Timestamp,
@@ -110,36 +114,85 @@ pub fn log_to_console(message: &str) {
 // SECTION 2: Error Handling & Validation
 // ============================================================================
 
-fn to_js_error<E: std::fmt::Display>(e: E) -> JsValue {
+/// Stable machine-readable code for a libsignal protocol error.
+///
+/// Codes are matched on the error **type**, never on the message string, so
+/// they stay specific even in release builds where messages are flattened.
+fn error_code(e: &SignalProtocolError) -> &'static str {
+    match e {
+        SignalProtocolError::NoSenderKeyState { .. } => "NoSenderKeyState",
+        SignalProtocolError::DuplicatedMessage(..) => "DuplicatedMessage",
+        SignalProtocolError::UntrustedIdentity(_) => "UntrustedIdentity",
+        SignalProtocolError::InvalidKyberPreKeyId => "InvalidKyberPreKeyId",
+        _ => "Generic",
+    }
+}
+
+/// Build a JS `Error` with the given message and a stable own `code` property.
+///
+/// Catch sites reading `.message` see the same string as before; note that
+/// `String(err)` now includes the standard `"Error: "` prefix because the
+/// thrown value is a real `Error` rather than a bare string.
+fn js_error_with_code(message: &str, code: &str) -> JsValue {
+    let error = js_sys::Error::new(message);
+    // A fresh Error object is extensible, so this cannot realistically fail.
+    let _ = js_sys::Reflect::set(
+        error.as_ref(),
+        &JsValue::from_str("code"),
+        &JsValue::from_str(code),
+    );
+    error.into()
+}
+
+/// Format the error message. Release builds flatten details to avoid leaking
+/// protocol internals; the `code` property remains fully specific.
+fn error_message<E: std::fmt::Display>(e: E) -> String {
     #[cfg(debug_assertions)]
     {
-        JsValue::from_str(&format!("SignalError: {}", e))
+        format!("SignalError: {}", e)
     }
     #[cfg(not(debug_assertions))]
     {
         let _ = e;
-        JsValue::from_str("SignalError: Operation failed")
+        "SignalError: Operation failed".to_string()
     }
+}
+
+/// Convert a libsignal protocol error, preserving a typed `code`.
+fn signal_error_to_js(e: SignalProtocolError) -> JsValue {
+    let code = error_code(&e);
+    js_error_with_code(&error_message(e), code)
+}
+
+/// Convert any other displayable error; always coded `Generic`.
+fn to_js_error<E: std::fmt::Display>(e: E) -> JsValue {
+    js_error_with_code(&error_message(e), "Generic")
+}
+
+/// A validation failure raised by the wrapper itself; always coded `Generic`.
+fn validation_error(message: &str) -> JsValue {
+    js_error_with_code(message, "Generic")
 }
 
 fn make_device_id(id: u32) -> Result<DeviceId, JsValue> {
     DeviceId::try_from(id).map_err(|_| {
-        JsValue::from_str(&format!("Invalid device ID (must be 1-{})", MAX_DEVICE_ID))
+        validation_error(&format!("Invalid device ID (must be 1-{})", MAX_DEVICE_ID))
     })
 }
 
-/// A Signal-specific namespace for UUIDv5 derivation, distinct from NAMESPACE_DNS.
-const SIGNAL_NAMESPACE_UUID: uuid::Uuid = uuid::Uuid::from_bytes([
-    0x5e, 0x0d, 0x4f, 0xe5, 0x5c, 0x2a, 0x4f, 0x7a,
-    0x8e, 0x1e, 0x3f, 0x8e, 0x2e, 0x8b, 0x1e, 0x3f,
-]);
-
-fn map_group_id(id: &str) -> uuid::Uuid {
-    if let Ok(uuid) = uuid::Uuid::parse_str(id) {
-        uuid
-    } else {
-        uuid::Uuid::new_v5(&SIGNAL_NAMESPACE_UUID, id.as_bytes())
-    }
+/// Parse a caller-minted distribution id.
+///
+/// libsignal keys sender-key records by `(sender, distribution_id)` where the
+/// id is caller-chosen (`rust/protocol/src/storage/traits.rs:164`). Since
+/// 0.4.0 the wrapper no longer derives ids internally: the value must be a
+/// valid UUID string minted by the caller.
+fn parse_distribution_id(id: &str) -> Result<uuid::Uuid, JsValue> {
+    uuid::Uuid::parse_str(id).map_err(|_| {
+        validation_error(&format!(
+            "Invalid distribution id (must be a UUID string): {}",
+            id
+        ))
+    })
 }
 
 fn now_system_time() -> std::time::SystemTime {
@@ -243,7 +296,7 @@ impl WasmIdentityKeyPair {
     /// Deserialize from standard protobuf format.
     #[wasm_bindgen(js_name = deserialize)]
     pub fn deserialize(data: &[u8]) -> Result<WasmIdentityKeyPair, JsValue> {
-        let pair = IdentityKeyPair::try_from(data).map_err(to_js_error)?;
+        let pair = IdentityKeyPair::try_from(data).map_err(signal_error_to_js)?;
         let pub_key = *pair.identity_key();
         let priv_key = *pair.private_key();
         Ok(WasmIdentityKeyPair {
@@ -322,25 +375,25 @@ impl WasmInMemSessionStore {
 
     #[wasm_bindgen]
     pub async fn archive_session(&mut self, address: &WasmProtocolAddress) -> Result<(), JsValue> {
-        if let Some(mut session) = self.0.load_session(&address.0).await.map_err(to_js_error)? {
-            session.archive_current_state().map_err(to_js_error)?;
-            self.0.store_session(&address.0, &session).await.map_err(to_js_error)?;
+        if let Some(mut session) = self.0.load_session(&address.0).await.map_err(signal_error_to_js)? {
+            session.archive_current_state().map_err(signal_error_to_js)?;
+            self.0.store_session(&address.0, &session).await.map_err(signal_error_to_js)?;
         }
         Ok(())
     }
 
     #[wasm_bindgen]
     pub async fn export_session(&self, address: &WasmProtocolAddress) -> Result<Option<Vec<u8>>, JsValue> {
-        match self.0.load_session(&address.0).await.map_err(to_js_error)? {
-            Some(session) => Ok(Some(session.serialize().map_err(to_js_error)?)),
+        match self.0.load_session(&address.0).await.map_err(signal_error_to_js)? {
+            Some(session) => Ok(Some(session.serialize().map_err(signal_error_to_js)?)),
             None => Ok(None),
         }
     }
 
     #[wasm_bindgen]
     pub async fn import_session(&mut self, address: &WasmProtocolAddress, session_bytes: &[u8]) -> Result<(), JsValue> {
-        let session = SessionRecord::deserialize(session_bytes).map_err(to_js_error)?;
-        self.0.store_session(&address.0, &session).await.map_err(to_js_error)?;
+        let session = SessionRecord::deserialize(session_bytes).map_err(signal_error_to_js)?;
+        self.0.store_session(&address.0, &session).await.map_err(signal_error_to_js)?;
         Ok(())
     }
 }
@@ -363,18 +416,18 @@ impl WasmInMemPreKeyStore {
 
     #[wasm_bindgen]
     pub async fn import_pre_key(&mut self, id: u32, record_bytes: &[u8]) -> Result<(), JsValue> {
-        let record = PreKeyRecord::deserialize(record_bytes).map_err(to_js_error)?;
-        if u32::from(record.id().map_err(to_js_error)?) != id {
-            return Err(JsValue::from_str("PreKey ID mismatch"));
+        let record = PreKeyRecord::deserialize(record_bytes).map_err(signal_error_to_js)?;
+        if u32::from(record.id().map_err(signal_error_to_js)?) != id {
+            return Err(validation_error("PreKey ID mismatch"));
         }
-        self.0.save_pre_key(id.into(), &record).await.map_err(to_js_error)?;
+        self.0.save_pre_key(id.into(), &record).await.map_err(signal_error_to_js)?;
         Ok(())
     }
 
     #[wasm_bindgen]
     pub async fn export_pre_key(&self, id: u32) -> Result<Option<Vec<u8>>, JsValue> {
         match self.0.get_pre_key(id.into()).await {
-            Ok(record) => Ok(Some(record.serialize().map_err(to_js_error)?)),
+            Ok(record) => Ok(Some(record.serialize().map_err(signal_error_to_js)?)),
             Err(_) => Ok(None),
         }
     }
@@ -398,18 +451,18 @@ impl WasmInMemSignedPreKeyStore {
 
     #[wasm_bindgen]
     pub async fn import_signed_pre_key(&mut self, id: u32, record_bytes: &[u8]) -> Result<(), JsValue> {
-        let record = SignedPreKeyRecord::deserialize(record_bytes).map_err(to_js_error)?;
-        if u32::from(record.id().map_err(to_js_error)?) != id {
-            return Err(JsValue::from_str("Signed PreKey ID mismatch"));
+        let record = SignedPreKeyRecord::deserialize(record_bytes).map_err(signal_error_to_js)?;
+        if u32::from(record.id().map_err(signal_error_to_js)?) != id {
+            return Err(validation_error("Signed PreKey ID mismatch"));
         }
-        self.0.save_signed_pre_key(id.into(), &record).await.map_err(to_js_error)?;
+        self.0.save_signed_pre_key(id.into(), &record).await.map_err(signal_error_to_js)?;
         Ok(())
     }
 
     #[wasm_bindgen]
     pub async fn export_signed_pre_key(&self, id: u32) -> Result<Option<Vec<u8>>, JsValue> {
         match self.0.get_signed_pre_key(id.into()).await {
-            Ok(record) => Ok(Some(record.serialize().map_err(to_js_error)?)),
+            Ok(record) => Ok(Some(record.serialize().map_err(signal_error_to_js)?)),
             Err(_) => Ok(None),
         }
     }
@@ -433,18 +486,18 @@ impl WasmInMemKyberPreKeyStore {
 
     #[wasm_bindgen]
     pub async fn import_kyber_pre_key(&mut self, id: u32, record_bytes: &[u8]) -> Result<(), JsValue> {
-        let record = KyberPreKeyRecord::deserialize(record_bytes).map_err(to_js_error)?;
-        if u32::from(record.id().map_err(to_js_error)?) != id {
-            return Err(JsValue::from_str("Kyber PreKey ID mismatch"));
+        let record = KyberPreKeyRecord::deserialize(record_bytes).map_err(signal_error_to_js)?;
+        if u32::from(record.id().map_err(signal_error_to_js)?) != id {
+            return Err(validation_error("Kyber PreKey ID mismatch"));
         }
-        self.0.save_kyber_pre_key(id.into(), &record).await.map_err(to_js_error)?;
+        self.0.save_kyber_pre_key(id.into(), &record).await.map_err(signal_error_to_js)?;
         Ok(())
     }
 
     #[wasm_bindgen]
     pub async fn export_kyber_pre_key(&self, id: u32) -> Result<Option<Vec<u8>>, JsValue> {
         match self.0.get_kyber_pre_key(id.into()).await {
-            Ok(record) => Ok(Some(record.serialize().map_err(to_js_error)?)),
+            Ok(record) => Ok(Some(record.serialize().map_err(signal_error_to_js)?)),
             Err(_) => Ok(None),
         }
     }
@@ -456,14 +509,73 @@ impl Default for WasmInMemKyberPreKeyStore {
     }
 }
 
+/// In-memory sender-key store with record removal.
+///
+/// Upstream `InMemSenderKeyStore` keeps its map private and offers no removal
+/// API, and the `SenderKeyStore` trait itself is only `store_sender_key` +
+/// `load_sender_key` (`rust/protocol/src/storage/inmem.rs:330`,
+/// `rust/protocol/src/storage/traits.rs:164`). Group-key rotation requires
+/// deleting the record for `(sender, distribution_id)` before re-creating it —
+/// canonical clients do exactly this (Signal-Desktop
+/// `sendToGroup.preload.ts:865-868`) — so the wrapper implements the public
+/// trait over its own map and adds `remove`.
+struct RemovableSenderKeyStore {
+    // Cow keys mirror upstream: store owned values, compare by reference.
+    keys: HashMap<(Cow<'static, ProtocolAddress>, uuid::Uuid), SenderKeyRecord>,
+}
+
+impl RemovableSenderKeyStore {
+    fn new() -> Self {
+        Self {
+            keys: HashMap::new(),
+        }
+    }
+
+    /// Delete the record for `(sender, distribution_id)`; `true` if one existed.
+    ///
+    /// Unlike lookups this builds an owned key: `HashMap::remove` borrows the
+    /// map mutably (invariant), so a `Cow::Borrowed` temporary cannot be used.
+    /// Removal is a rare rotation-time operation, so one clone is fine.
+    fn remove(&mut self, sender: &ProtocolAddress, distribution_id: uuid::Uuid) -> bool {
+        self.keys
+            .remove(&(Cow::Owned(sender.clone()), distribution_id))
+            .is_some()
+    }
+}
+
+#[async_trait(?Send)]
+impl SenderKeyStore for RemovableSenderKeyStore {
+    async fn store_sender_key(
+        &mut self,
+        sender: &ProtocolAddress,
+        distribution_id: uuid::Uuid,
+        record: &SenderKeyRecord,
+    ) -> Result<(), SignalProtocolError> {
+        self.keys
+            .insert((Cow::Owned(sender.clone()), distribution_id), record.clone());
+        Ok(())
+    }
+
+    async fn load_sender_key(
+        &mut self,
+        sender: &ProtocolAddress,
+        distribution_id: uuid::Uuid,
+    ) -> Result<Option<SenderKeyRecord>, SignalProtocolError> {
+        Ok(self
+            .keys
+            .get(&(Cow::Borrowed(sender), distribution_id))
+            .cloned())
+    }
+}
+
 #[wasm_bindgen]
-pub struct WasmInMemSenderKeyStore(InMemSenderKeyStore);
+pub struct WasmInMemSenderKeyStore(RemovableSenderKeyStore);
 
 #[wasm_bindgen]
 impl WasmInMemSenderKeyStore {
     #[wasm_bindgen(constructor)]
     pub fn new() -> WasmInMemSenderKeyStore {
-        WasmInMemSenderKeyStore(InMemSenderKeyStore::new())
+        WasmInMemSenderKeyStore(RemovableSenderKeyStore::new())
     }
 
     #[wasm_bindgen]
@@ -472,9 +584,9 @@ impl WasmInMemSenderKeyStore {
         address: &WasmProtocolAddress,
         distribution_id: String,
     ) -> Result<Option<Vec<u8>>, JsValue> {
-        let dist_id = map_group_id(&distribution_id);
-        match self.0.load_sender_key(&address.0, dist_id).await.map_err(to_js_error)? {
-            Some(record) => Ok(Some(record.serialize().map_err(to_js_error)?)),
+        let dist_id = parse_distribution_id(&distribution_id)?;
+        match self.0.load_sender_key(&address.0, dist_id).await.map_err(signal_error_to_js)? {
+            Some(record) => Ok(Some(record.serialize().map_err(signal_error_to_js)?)),
             None => Ok(None),
         }
     }
@@ -486,10 +598,26 @@ impl WasmInMemSenderKeyStore {
         distribution_id: String,
         record_bytes: &[u8],
     ) -> Result<(), JsValue> {
-        let dist_id = map_group_id(&distribution_id);
-        let record = SenderKeyRecord::deserialize(record_bytes).map_err(to_js_error)?;
-        self.0.store_sender_key(&address.0, dist_id, &record).await.map_err(to_js_error)?;
+        let dist_id = parse_distribution_id(&distribution_id)?;
+        let record = SenderKeyRecord::deserialize(record_bytes).map_err(signal_error_to_js)?;
+        self.0.store_sender_key(&address.0, dist_id, &record).await.map_err(signal_error_to_js)?;
         Ok(())
+    }
+
+    /// Delete the sender-key record for `(address, distribution_id)`.
+    ///
+    /// Rotation must delete the record before re-creating it, otherwise
+    /// `createSenderKeyDistribution` reuses the existing chain and removed
+    /// group members keep deriving future message keys. Returns `true` if a
+    /// record was actually removed.
+    #[wasm_bindgen]
+    pub async fn remove_sender_key(
+        &mut self,
+        address: &WasmProtocolAddress,
+        distribution_id: String,
+    ) -> Result<bool, JsValue> {
+        let dist_id = parse_distribution_id(&distribution_id)?;
+        Ok(self.0.remove(&address.0, dist_id))
     }
 }
 
@@ -669,7 +797,7 @@ impl WasmGroupMasterKey {
     #[wasm_bindgen]
     pub fn from_bytes(bytes: &[u8]) -> Result<WasmGroupMasterKey, JsValue> {
         let array: [u8; GROUP_MASTER_KEY_SIZE] = bytes.try_into().map_err(|_| {
-            JsValue::from_str(&format!("Invalid key length (must be {} bytes)", GROUP_MASTER_KEY_SIZE))
+            validation_error(&format!("Invalid key length (must be {} bytes)", GROUP_MASTER_KEY_SIZE))
         })?;
         Ok(WasmGroupMasterKey {
             inner: GroupMasterKey::new(array),
@@ -745,7 +873,7 @@ pub async fn generate_pre_keys(
     prekey_store: &mut WasmInMemPreKeyStore,
 ) -> Result<Vec<WasmPreKey>, JsValue> {
     if count > MAX_PREKEY_BATCH_SIZE {
-        return Err(JsValue::from_str(&format!(
+        return Err(validation_error(&format!(
             "Batch size {} exceeds maximum {}",
             count, MAX_PREKEY_BATCH_SIZE
         )));
@@ -757,11 +885,11 @@ pub async fn generate_pre_keys(
         let id = start_id.wrapping_add(i) & 0x00FF_FFFF;
         let key_pair = KeyPair::generate(&mut rng);
         let prekey_record = PreKeyRecord::new(id.into(), &key_pair);
-        let serialized = prekey_record.serialize().map_err(to_js_error)?;
+        let serialized = prekey_record.serialize().map_err(signal_error_to_js)?;
 
         prekey_store.0.save_pre_key(id.into(), &prekey_record)
             .await
-            .map_err(to_js_error)?;
+            .map_err(signal_error_to_js)?;
 
         result.push(WasmPreKey {
             id,
@@ -790,13 +918,13 @@ pub async fn generate_signed_pre_key(
 
     let timestamp = now_timestamp();
     let signed_prekey_record = SignedPreKeyRecord::new(key_id.into(), timestamp, &key_pair, &signature);
-    let serialized = signed_prekey_record.serialize().map_err(to_js_error)?;
+    let serialized = signed_prekey_record.serialize().map_err(signal_error_to_js)?;
 
     signed_prekey_store
         .0
         .save_signed_pre_key(key_id.into(), &signed_prekey_record)
         .await
-        .map_err(to_js_error)?;
+        .map_err(signal_error_to_js)?;
 
     Ok(WasmSignedPreKey {
         id: key_id,
@@ -823,7 +951,7 @@ pub async fn generate_kyber_pre_key(
         .map_err(to_js_error)?;
     let timestamp = now_timestamp();
     let kyber_record = KyberPreKeyRecord::new(key_id.into(), timestamp, &key_pair, &signature);
-    let serialized = kyber_record.serialize().map_err(to_js_error)?;
+    let serialized = kyber_record.serialize().map_err(signal_error_to_js)?;
 
     let public_key = key_pair.public_key.serialize().to_vec();
 
@@ -831,7 +959,7 @@ pub async fn generate_kyber_pre_key(
         .0
         .save_kyber_pre_key(key_id.into(), &kyber_record)
         .await
-        .map_err(to_js_error)?;
+        .map_err(signal_error_to_js)?;
 
     Ok(WasmKyberPreKey {
         id: key_id,
@@ -878,7 +1006,7 @@ pub async fn process_pre_key_bundle(
 ) -> Result<(), JsValue> {
     let identity_key_pub = identity_key.0;
     let signed_prekey_pub = signed_prekey.0;
-    let kyber_prekey_pub = kem::PublicKey::deserialize(kyber_prekey).map_err(to_js_error)?;
+    let kyber_prekey_pub = kem::PublicKey::deserialize(kyber_prekey).map_err(signal_error_to_js)?;
 
     let prekey_tuple = match (prekey_id, prekey) {
         (Some(id), Some(bytes)) => {
@@ -900,7 +1028,7 @@ pub async fn process_pre_key_bundle(
         kyber_prekey_signature.to_vec(),
         identity_key_pub.into(),
     )
-    .map_err(to_js_error)?;
+    .map_err(signal_error_to_js)?;
 
     let mut rng = rand::rng();
     process_prekey_bundle(
@@ -913,7 +1041,7 @@ pub async fn process_pre_key_bundle(
         &mut rng,
     )
     .await
-    .map_err(to_js_error)?;
+    .map_err(signal_error_to_js)?;
 
     Ok(())
 }
@@ -938,7 +1066,7 @@ pub async fn encrypt_message(
         &mut rng,
     )
     .await
-    .map_err(to_js_error)?;
+    .map_err(signal_error_to_js)?;
 
     Ok(WasmCiphertext {
         message_type: ciphertext.message_type() as u8,
@@ -963,18 +1091,18 @@ pub async fn decrypt_message(
     let mut rng = rand::rng();
 
     let msg_type = CiphertextMessageType::try_from(message_type).map_err(|_| {
-        JsValue::from_str(&format!("Unknown message type: {}", message_type))
+        validation_error(&format!("Unknown message type: {}", message_type))
     })?;
 
     let ciphertext_msg: CiphertextMessage = match msg_type {
         CiphertextMessageType::Whisper => CiphertextMessage::SignalMessage(
-            SignalMessage::try_from(ciphertext).map_err(to_js_error)?,
+            SignalMessage::try_from(ciphertext).map_err(signal_error_to_js)?,
         ),
         CiphertextMessageType::PreKey => CiphertextMessage::PreKeySignalMessage(
-            PreKeySignalMessage::try_from(ciphertext).map_err(to_js_error)?,
+            PreKeySignalMessage::try_from(ciphertext).map_err(signal_error_to_js)?,
         ),
         _ => {
-            return Err(JsValue::from_str(&format!(
+            return Err(validation_error(&format!(
                 "Unsupported message type for decrypt: {:?}",
                 msg_type
             )))
@@ -993,19 +1121,22 @@ pub async fn decrypt_message(
         &mut rng,
     )
     .await
-    .map_err(to_js_error)?;
+    .map_err(signal_error_to_js)?;
 
     Ok(plaintext)
 }
 
 /// Create a sender key distribution message.
+///
+/// `distribution_id` must be a caller-minted UUID string; since 0.4.0 the
+/// wrapper no longer derives an id from arbitrary group strings.
 #[wasm_bindgen(js_name = createSenderKeyDistribution)]
 pub async fn create_sender_key_distribution(
     local_address: &WasmProtocolAddress,
     distribution_id: String,
     sender_key_store: &mut WasmInMemSenderKeyStore,
 ) -> Result<Vec<u8>, JsValue> {
-    let dist_id = map_group_id(&distribution_id);
+    let dist_id = parse_distribution_id(&distribution_id)?;
     let mut rng = rand::rng();
     let skdm = create_sender_key_distribution_message(
         &local_address.0,
@@ -1014,26 +1145,32 @@ pub async fn create_sender_key_distribution(
         &mut rng,
     )
     .await
-    .map_err(to_js_error)?;
+    .map_err(signal_error_to_js)?;
 
     Ok(skdm.serialized().to_vec())
 }
 
 /// Process a sender key distribution message.
+///
+/// The distribution id is read from the message itself, so no id parameter is
+/// required here.
 #[wasm_bindgen(js_name = processSenderKeyDistribution)]
 pub async fn process_sender_key_distribution(
     sender_address: &WasmProtocolAddress,
     distribution_message: &[u8],
     sender_key_store: &mut WasmInMemSenderKeyStore,
 ) -> Result<(), JsValue> {
-    let skdm = SenderKeyDistributionMessage::try_from(distribution_message).map_err(to_js_error)?;
+    let skdm = SenderKeyDistributionMessage::try_from(distribution_message).map_err(signal_error_to_js)?;
     process_sender_key_distribution_message(&sender_address.0, &skdm, &mut sender_key_store.0)
         .await
-        .map_err(to_js_error)?;
+        .map_err(signal_error_to_js)?;
     Ok(())
 }
 
 /// Encrypt a group message.
+///
+/// `distribution_id` must be the same caller-minted UUID string used for
+/// `createSenderKeyDistribution`.
 #[wasm_bindgen(js_name = encryptGroupMessage)]
 pub async fn encrypt_group_message(
     local_address: &WasmProtocolAddress,
@@ -1041,7 +1178,7 @@ pub async fn encrypt_group_message(
     plaintext: &[u8],
     sender_key_store: &mut WasmInMemSenderKeyStore,
 ) -> Result<Vec<u8>, JsValue> {
-    let dist_id = map_group_id(&distribution_id);
+    let dist_id = parse_distribution_id(&distribution_id)?;
     let mut rng = rand::rng();
     let ciphertext = group_encrypt(
         &mut sender_key_store.0,
@@ -1051,12 +1188,15 @@ pub async fn encrypt_group_message(
         &mut rng,
     )
     .await
-    .map_err(to_js_error)?;
+    .map_err(signal_error_to_js)?;
 
     Ok(ciphertext.serialized().to_vec())
 }
 
 /// Decrypt a group message.
+///
+/// The distribution id is embedded in the ciphertext, so the record lookup is
+/// keyed automatically; an unknown id surfaces as a `NoSenderKeyState` error.
 #[wasm_bindgen(js_name = decryptGroupMessage)]
 pub async fn decrypt_group_message(
     sender_address: &WasmProtocolAddress,
@@ -1065,7 +1205,7 @@ pub async fn decrypt_group_message(
 ) -> Result<Vec<u8>, JsValue> {
     let plaintext = group_decrypt(ciphertext, &mut sender_key_store.0, &sender_address.0)
         .await
-        .map_err(to_js_error)?;
+        .map_err(signal_error_to_js)?;
 
     Ok(plaintext)
 }
@@ -1124,13 +1264,13 @@ pub fn verify_safety_number(
 #[wasm_bindgen]
 pub fn generate_random_bytes(length: usize) -> Result<Vec<u8>, JsValue> {
     if length > MAX_RANDOM_BYTES_LENGTH {
-        return Err(JsValue::from_str(&format!(
+        return Err(validation_error(&format!(
             "Requested length {} exceeds maximum allowed {} bytes",
             length, MAX_RANDOM_BYTES_LENGTH
         )));
     }
     let mut bytes = vec![0u8; length];
-    getrandom::fill(&mut bytes).map_err(|e| JsValue::from_str(&format!("CSPRNG error: {}", e)))?;
+    getrandom::fill(&mut bytes).map_err(|e| validation_error(&format!("CSPRNG error: {}", e)))?;
     Ok(bytes)
 }
 
@@ -1147,7 +1287,7 @@ pub fn generate_uuid() -> Vec<u8> {
 #[wasm_bindgen]
 pub fn uuid_to_string(bytes: &[u8]) -> Result<String, JsValue> {
     if bytes.len() != 16 {
-        return Err(JsValue::from_str("UUID must be 16 bytes"));
+        return Err(validation_error("UUID must be 16 bytes"));
     }
     let uuid = uuid::Uuid::from_slice(bytes).map_err(to_js_error)?;
     Ok(uuid.to_string())

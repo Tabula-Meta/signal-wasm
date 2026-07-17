@@ -137,7 +137,14 @@ All stores support import/export for IndexedDB persistence.
 | `InMemPreKeyStore` | `new()` | `export_pre_key(id)`, `import_pre_key(id, bytes)` |
 | `InMemSignedPreKeyStore` | `new()` | `export_signed_pre_key(id)`, `import_signed_pre_key(id, bytes)` |
 | `InMemKyberPreKeyStore` | `new()` | `export_kyber_pre_key(id)`, `import_kyber_pre_key(id, bytes)` |
-| `InMemSenderKeyStore` | `new()` | `export_sender_key(address, distributionId)`, `import_sender_key(address, distributionId, bytes)` |
+| `InMemSenderKeyStore` | `new()` | `export_sender_key(address, distributionId)`, `import_sender_key(address, distributionId, bytes)`, `remove_sender_key(address, distributionId)` |
+
+> **Since 0.4.0:** every `distributionId` must be a caller-minted **UUID string**
+> (e.g. `crypto.randomUUID()`). The wrapper no longer derives an id from
+> arbitrary group strings. `remove_sender_key(address, distributionId)` deletes
+> the sender-key record (returns `boolean`) and must be called before
+> re-creating a distribution on member removal/compromise, otherwise libsignal
+> reuses the existing chain and removed members keep decrypting.
 
 ### Key Generation
 
@@ -155,10 +162,32 @@ All stores support import/export for IndexedDB persistence.
 | `processPreKeyBundle(...)` | `Promise<void>` | Establish a session from a PreKey bundle |
 | `encryptMessage(plaintext, recipient, localAddress, sessionStore, identityStore)` | `Promise<WasmCiphertext>` | Encrypt a 1:1 message |
 | `decryptMessage(ciphertext, type, sender, localAddress, sessionStore, identityStore, prekeyStore, signedPrekeyStore, kyberPrekeyStore)` | `Promise<Uint8Array>` | Decrypt a 1:1 message |
-| `createSenderKeyDistribution(localAddress, distributionId, senderKeyStore)` | `Promise<Uint8Array>` | Create a sender key distribution message |
-| `processSenderKeyDistribution(senderAddress, distMessage, senderKeyStore)` | `Promise<void>` | Process a sender key distribution message |
-| `encryptGroupMessage(localAddress, distributionId, plaintext, senderKeyStore)` | `Promise<Uint8Array>` | Encrypt a group message |
-| `decryptGroupMessage(senderAddress, ciphertext, senderKeyStore)` | `Promise<Uint8Array>` | Decrypt a group message |
+| `createSenderKeyDistribution(localAddress, distributionId, senderKeyStore)` | `Promise<Uint8Array>` | Create a sender key distribution message (`distributionId` must be a UUID string) |
+| `processSenderKeyDistribution(senderAddress, distMessage, senderKeyStore)` | `Promise<void>` | Process a sender key distribution message (id read from the message) |
+| `encryptGroupMessage(localAddress, distributionId, plaintext, senderKeyStore)` | `Promise<Uint8Array>` | Encrypt a group message (`distributionId` must be a UUID string) |
+| `decryptGroupMessage(senderAddress, ciphertext, senderKeyStore)` | `Promise<Uint8Array>` | Decrypt a group message (id read from the ciphertext) |
+
+### Error Handling
+
+Every rejected promise throws a real JS `Error` with:
+
+- `message` — `"SignalError: <detail>"` in debug builds; flattened to
+  `"SignalError: Operation failed"` in release builds (unchanged behaviour).
+- `code` — a stable machine-readable string, matched on the libsignal error
+  **type** so it stays specific even in release builds:
+
+| `code` | Meaning |
+|--------|---------|
+| `NoSenderKeyState` | No sender-key record for the message's distribution id (e.g. SKDM not processed yet — retry after pull) |
+| `DuplicatedMessage` | Message counter already seen (replay/duplicate; usually benign) |
+| `UntrustedIdentity` | Sender identity key not trusted for the address |
+| `InvalidKyberPreKeyId` | Referenced Kyber pre-key id is invalid/missing |
+| `Generic` | Everything else, including wrapper-side validation failures |
+
+Note: `String(err)` now yields `"Error: SignalError: …"` (standard `Error`
+stringification) instead of the bare message, because the thrown value is a
+real `Error` rather than a string. Catch sites reading `err.message` are
+unaffected.
 
 ### Safety Numbers
 
