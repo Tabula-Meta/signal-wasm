@@ -22,6 +22,7 @@ use zkgroup::GroupIdentifierBytes;
 
 use subtle::ConstantTimeEq;
 use wasm_bindgen::prelude::*;
+use zeroize::Zeroizing;
 use libsignal_protocol::{
     create_sender_key_distribution_message,
     group_decrypt,
@@ -35,6 +36,7 @@ use libsignal_protocol::{
     CiphertextMessageType,
     DeviceId,
     Fingerprint,
+    FingerprintError,
     GenericSignedPreKey,
     IdentityKey,
     IdentityKeyPair,
@@ -105,6 +107,9 @@ pub fn init() {
     }
 }
 
+/// Debug-only console logging helper. Not exported in release builds — a
+/// production wasm artifact must not carry a debug logging backdoor.
+#[cfg(debug_assertions)]
 #[wasm_bindgen]
 pub fn log_to_console(message: &str) {
     web_sys::console::log_1(&message.into());
@@ -124,6 +129,8 @@ fn error_code(e: &SignalProtocolError) -> &'static str {
         SignalProtocolError::DuplicatedMessage(..) => "DuplicatedMessage",
         SignalProtocolError::UntrustedIdentity(_) => "UntrustedIdentity",
         SignalProtocolError::InvalidKyberPreKeyId => "InvalidKyberPreKeyId",
+        SignalProtocolError::InvalidPreKeyId => "InvalidPreKeyId",
+        SignalProtocolError::InvalidSignedPreKeyId => "InvalidSignedPreKeyId",
         _ => "Generic",
     }
 }
@@ -174,6 +181,26 @@ fn validation_error(message: &str) -> JsValue {
     js_error_with_code(message, "Generic")
 }
 
+/// Stable machine-readable code for a fingerprint error.
+///
+/// `VersionMismatch` is the interesting case for QR-scan UX (the two parties
+/// are on incompatible fingerprint versions); parse failures of the scanned
+/// payload get their own code so callers can tell "bad QR" apart from
+/// "mismatch".
+fn fingerprint_error_code(e: &FingerprintError) -> &'static str {
+    match e {
+        FingerprintError::VersionMismatch { .. } => "FingerprintVersionMismatch",
+        FingerprintError::ParsingError(_) => "FingerprintParsingError",
+        FingerprintError::InvalidIterationCount(_) => "FingerprintParsingError",
+    }
+}
+
+/// Convert a fingerprint error, preserving a typed `code`.
+fn fingerprint_error_to_js(e: FingerprintError) -> JsValue {
+    let code = fingerprint_error_code(&e);
+    js_error_with_code(&error_message(e), code)
+}
+
 fn make_device_id(id: u32) -> Result<DeviceId, JsValue> {
     DeviceId::try_from(id).map_err(|_| {
         validation_error(&format!("Invalid device ID (must be 1-{})", MAX_DEVICE_ID))
@@ -208,6 +235,13 @@ fn now_timestamp() -> Timestamp {
 // ============================================================================
 
 /// PrivateKey — standalone asymmetric secret key.
+///
+/// Zeroization note: the inner libsignal `PrivateKey` is a `Copy` type over a
+/// `[u8; 32]` that upstream does not zero on drop, so this wrapper cannot
+/// guarantee erasure of the scalar itself. The wrapper does zeroise every
+/// secret-bearing buffer it owns (serialized prekey records, group master-key
+/// bytes). Bytes exported to JS (`serialize()`) are copies in JS memory,
+/// subject to the browser's GC — they cannot be erased from Rust.
 #[wasm_bindgen]
 #[derive(Clone)]
 pub struct WasmPrivateKey(PrivateKey);
@@ -364,13 +398,14 @@ impl WasmInMemSessionStore {
 
     #[wasm_bindgen]
     pub async fn has_session(&self, address: &WasmProtocolAddress) -> Result<bool, JsValue> {
-        let result = self
+        // Store errors are surfaced, not swallowed: a falsey "false" would be
+        // indistinguishable from "no session" (L4).
+        let session = self
             .0
             .load_session(&address.0)
             .await
-            .map(|s| s.is_some())
-            .unwrap_or(false);
-        Ok(result)
+            .map_err(signal_error_to_js)?;
+        Ok(session.is_some())
     }
 
     #[wasm_bindgen]
@@ -426,9 +461,12 @@ impl WasmInMemPreKeyStore {
 
     #[wasm_bindgen]
     pub async fn export_pre_key(&self, id: u32) -> Result<Option<Vec<u8>>, JsValue> {
+        // `InvalidPreKeyId` means "not present" (inmem store convention);
+        // any other store error is surfaced, not swallowed as `None` (L4).
         match self.0.get_pre_key(id.into()).await {
             Ok(record) => Ok(Some(record.serialize().map_err(signal_error_to_js)?)),
-            Err(_) => Ok(None),
+            Err(SignalProtocolError::InvalidPreKeyId) => Ok(None),
+            Err(e) => Err(signal_error_to_js(e)),
         }
     }
 }
@@ -461,9 +499,11 @@ impl WasmInMemSignedPreKeyStore {
 
     #[wasm_bindgen]
     pub async fn export_signed_pre_key(&self, id: u32) -> Result<Option<Vec<u8>>, JsValue> {
+        // See export_pre_key: only the not-found sentinel maps to `None`.
         match self.0.get_signed_pre_key(id.into()).await {
             Ok(record) => Ok(Some(record.serialize().map_err(signal_error_to_js)?)),
-            Err(_) => Ok(None),
+            Err(SignalProtocolError::InvalidSignedPreKeyId) => Ok(None),
+            Err(e) => Err(signal_error_to_js(e)),
         }
     }
 }
@@ -496,9 +536,11 @@ impl WasmInMemKyberPreKeyStore {
 
     #[wasm_bindgen]
     pub async fn export_kyber_pre_key(&self, id: u32) -> Result<Option<Vec<u8>>, JsValue> {
+        // See export_pre_key: only the not-found sentinel maps to `None`.
         match self.0.get_kyber_pre_key(id.into()).await {
             Ok(record) => Ok(Some(record.serialize().map_err(signal_error_to_js)?)),
-            Err(_) => Ok(None),
+            Err(SignalProtocolError::InvalidKyberPreKeyId) => Ok(None),
+            Err(e) => Err(signal_error_to_js(e)),
         }
     }
 }
@@ -636,7 +678,9 @@ impl Default for WasmInMemSenderKeyStore {
 pub struct WasmPreKey {
     id: u32,
     public_key: Vec<u8>,
-    record: Vec<u8>,
+    /// Serialized PreKeyRecord protobuf — contains the private half, so it is
+    /// zeroised on drop.
+    record: Zeroizing<Vec<u8>>,
 }
 
 #[wasm_bindgen]
@@ -653,7 +697,7 @@ impl WasmPreKey {
 
     #[wasm_bindgen(getter)]
     pub fn record(&self) -> Vec<u8> {
-        self.record.clone()
+        self.record.to_vec()
     }
 }
 
@@ -664,7 +708,9 @@ pub struct WasmSignedPreKey {
     public_key: Vec<u8>,
     signature: Vec<u8>,
     timestamp: u64,
-    record: Vec<u8>,
+    /// Serialized SignedPreKeyRecord protobuf — contains the private half, so
+    /// it is zeroised on drop.
+    record: Zeroizing<Vec<u8>>,
 }
 
 #[wasm_bindgen]
@@ -691,7 +737,7 @@ impl WasmSignedPreKey {
 
     #[wasm_bindgen(getter)]
     pub fn record(&self) -> Vec<u8> {
-        self.record.clone()
+        self.record.to_vec()
     }
 }
 
@@ -702,7 +748,9 @@ pub struct WasmKyberPreKey {
     public_key: Vec<u8>,
     signature: Vec<u8>,
     timestamp: u64,
-    record: Vec<u8>,
+    /// Serialized KyberPreKeyRecord protobuf — contains the private half, so
+    /// it is zeroised on drop.
+    record: Zeroizing<Vec<u8>>,
 }
 
 #[wasm_bindgen]
@@ -729,7 +777,7 @@ impl WasmKyberPreKey {
 
     #[wasm_bindgen(getter)]
     pub fn record(&self) -> Vec<u8> {
-        self.record.clone()
+        self.record.to_vec()
     }
 }
 
@@ -778,18 +826,19 @@ impl WasmSafetyNumber {
 #[wasm_bindgen]
 pub struct WasmGroupMasterKey {
     inner: GroupMasterKey,
-    bytes: [u8; GROUP_MASTER_KEY_SIZE],
+    /// Raw master-key bytes — zeroised on drop.
+    bytes: Zeroizing<[u8; GROUP_MASTER_KEY_SIZE]>,
 }
 
 #[wasm_bindgen]
 impl WasmGroupMasterKey {
     #[wasm_bindgen]
     pub fn generate() -> WasmGroupMasterKey {
-        let mut bytes = [0u8; GROUP_MASTER_KEY_SIZE];
+        let mut bytes = Zeroizing::new([0u8; GROUP_MASTER_KEY_SIZE]);
         let mut rng = rand::rng();
-        rand::prelude::Rng::fill(&mut rng, &mut bytes);
+        rand::prelude::Rng::fill(&mut rng, bytes.as_mut());
         WasmGroupMasterKey {
-            inner: GroupMasterKey::new(bytes),
+            inner: GroupMasterKey::new(*bytes),
             bytes,
         }
     }
@@ -799,8 +848,9 @@ impl WasmGroupMasterKey {
         let array: [u8; GROUP_MASTER_KEY_SIZE] = bytes.try_into().map_err(|_| {
             validation_error(&format!("Invalid key length (must be {} bytes)", GROUP_MASTER_KEY_SIZE))
         })?;
+        let array = Zeroizing::new(array);
         Ok(WasmGroupMasterKey {
-            inner: GroupMasterKey::new(array),
+            inner: GroupMasterKey::new(*array),
             bytes: array,
         })
     }
@@ -814,7 +864,7 @@ impl WasmGroupMasterKey {
     pub fn derive_secret_params(&self) -> WasmGroupSecretParams {
         WasmGroupSecretParams {
             inner: GroupSecretParams::derive_from_master_key(self.inner),
-            master_key_bytes: self.bytes,
+            master_key_bytes: self.bytes.clone(),
         }
     }
 
@@ -843,13 +893,17 @@ impl WasmGroupIdentifier {
 #[wasm_bindgen]
 pub struct WasmGroupSecretParams {
     inner: GroupSecretParams,
-    master_key_bytes: [u8; GROUP_MASTER_KEY_SIZE],
+    /// Raw master-key bytes — zeroised on drop.
+    master_key_bytes: Zeroizing<[u8; GROUP_MASTER_KEY_SIZE]>,
 }
 
 #[wasm_bindgen]
 impl WasmGroupSecretParams {
+    /// Returns the 32-byte **master key**, not the (289-byte) group secret
+    /// params. Named explicitly so no future caller mistakes it for the full
+    /// params encoding (see L1 in the 0.5.0 audit).
     #[wasm_bindgen(getter)]
-    pub fn serialize(&self) -> Vec<u8> {
+    pub fn serialize_master_key(&self) -> Vec<u8> {
         self.master_key_bytes.to_vec()
     }
 
@@ -894,7 +948,7 @@ pub async fn generate_pre_keys(
         result.push(WasmPreKey {
             id,
             public_key: key_pair.public_key.serialize().to_vec(),
-            record: serialized,
+            record: Zeroizing::new(serialized),
         });
     }
 
@@ -931,7 +985,7 @@ pub async fn generate_signed_pre_key(
         public_key: key_pair.public_key.serialize().to_vec(),
         signature: signature.to_vec(),
         timestamp: timestamp.epoch_millis(),
-        record: serialized,
+        record: Zeroizing::new(serialized),
     })
 }
 
@@ -966,7 +1020,7 @@ pub async fn generate_kyber_pre_key(
         public_key,
         signature: signature.to_vec(),
         timestamp: timestamp.epoch_millis(),
-        record: serialized,
+        record: Zeroizing::new(serialized),
     })
 }
 
@@ -1210,6 +1264,28 @@ pub async fn decrypt_group_message(
     Ok(plaintext)
 }
 
+/// Build OUR combined fingerprint for `(local, contact)`, sorted internally by
+/// libsignal's canonical ordering rules (`Fingerprint::new`).
+fn build_fingerprint(
+    local_uuid: &str,
+    local_identity_key: &WasmPublicKey,
+    contact_uuid: &str,
+    contact_identity_key: &WasmPublicKey,
+) -> Result<Fingerprint, JsValue> {
+    let local_key: IdentityKey = local_identity_key.0.into();
+    let contact_key: IdentityKey = contact_identity_key.0.into();
+
+    Fingerprint::new(
+        FINGERPRINT_VERSION,
+        FINGERPRINT_ITERATIONS,
+        local_uuid.as_bytes(),
+        &local_key,
+        contact_uuid.as_bytes(),
+        &contact_key,
+    )
+    .map_err(fingerprint_error_to_js)
+}
+
 /// Generate a safety number.
 #[wasm_bindgen(js_name = generateSafetyNumber)]
 pub fn generate_safety_number(
@@ -1218,26 +1294,58 @@ pub fn generate_safety_number(
     contact_uuid: String,
     contact_identity_key: &WasmPublicKey,
 ) -> Result<WasmSafetyNumber, JsValue> {
-    let local_key: IdentityKey = local_identity_key.0.into();
-    let contact_key: IdentityKey = contact_identity_key.0.into();
-
-    let fingerprint = Fingerprint::new(
-        FINGERPRINT_VERSION,
-        FINGERPRINT_ITERATIONS,
-        local_uuid.as_bytes(),
-        &local_key,
-        contact_uuid.as_bytes(),
-        &contact_key,
-    )
-    .map_err(to_js_error)?;
+    let fingerprint = build_fingerprint(
+        &local_uuid,
+        local_identity_key,
+        &contact_uuid,
+        contact_identity_key,
+    )?;
 
     Ok(WasmSafetyNumber {
         displayable: fingerprint.display.to_string(),
-        scannable: fingerprint.scannable.serialize().map_err(to_js_error)?,
+        scannable: fingerprint.scannable.serialize().map_err(fingerprint_error_to_js)?,
     })
 }
 
+/// Verify a scanned QR-code fingerprint against OUR view of the session.
+///
+/// This is the canonical cross-perspective check
+/// (`ScannableFingerprint::compare`, libsignal
+/// `rust/protocol/src/fingerprint.rs`): the scanned payload encodes the OTHER
+/// party's CombinedFingerprints, so verification requires their.local ==
+/// our.remote AND their.remote == our.local, enforced in constant time, with
+/// version equality. A version mismatch throws with code
+/// `FingerprintVersionMismatch`; an undecodable payload throws with code
+/// `FingerprintParsingError`.
+#[wasm_bindgen(js_name = verifyScannableFingerprint)]
+pub fn verify_scannable_fingerprint(
+    scanned: &[u8],
+    local_uuid: String,
+    local_identity_key: &WasmPublicKey,
+    contact_uuid: String,
+    contact_identity_key: &WasmPublicKey,
+) -> Result<bool, JsValue> {
+    let fingerprint = build_fingerprint(
+        &local_uuid,
+        local_identity_key,
+        &contact_uuid,
+        contact_identity_key,
+    )?;
+
+    fingerprint
+        .scannable
+        .compare(scanned)
+        .map_err(fingerprint_error_to_js)
+}
+
 /// Verify a scanned safety number.
+///
+/// **Deprecated**: this recomputes OUR OWN fingerprint and byte-compares it
+/// with the scanned payload, which can never validate a cross-perspective
+/// scan (the scanned QR encodes the OTHER party's CombinedFingerprints with
+/// local/remote swapped). Use `verifyScannableFingerprint`, which implements
+/// the canonical `ScannableFingerprint::compare` semantics. Kept for API
+/// compatibility only.
 #[wasm_bindgen(js_name = verifySafetyNumber)]
 pub fn verify_safety_number(
     scanned: &[u8],
@@ -1255,6 +1363,42 @@ pub fn verify_safety_number(
 
     let valid = scanned.ct_eq(&expected.scannable);
     Ok(valid.into())
+}
+
+// ============================================================================
+// SECTION 9B: Identity Proof-of-Possession
+// ============================================================================
+
+/// Sign `message` with an identity private key (XEdDSA over the X25519
+/// identity key, canonical `PrivateKey::calculate_signature`).
+///
+/// Intended for server-verifiable proof-of-possession of an identity key,
+/// e.g. authorising a re-key. Returns the 64-byte signature.
+#[wasm_bindgen(js_name = signWithIdentityKey)]
+pub fn sign_with_identity_key(
+    identity_private_key: &WasmPrivateKey,
+    message: &[u8],
+) -> Result<Vec<u8>, JsValue> {
+    let mut rng = rand::rng();
+    let signature = identity_private_key
+        .0
+        .calculate_signature(message, &mut rng)
+        .map_err(to_js_error)?;
+    Ok(signature.into_vec())
+}
+
+/// Verify an identity-key signature produced by `signWithIdentityKey`
+/// (canonical `PublicKey::verify_signature`, constant-time).
+///
+/// Returns `false` for a wrong key, wrong message, or malformed signature —
+/// verification failure is data, not an error.
+#[wasm_bindgen(js_name = verifyIdentitySignature)]
+pub fn verify_identity_signature(
+    identity_public_key: &WasmPublicKey,
+    message: &[u8],
+    signature: &[u8],
+) -> bool {
+    identity_public_key.0.verify_signature(message, signature)
 }
 
 // ============================================================================

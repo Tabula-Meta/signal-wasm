@@ -559,7 +559,7 @@ async fn test_gv2_key_derivation() {
     assert_eq!(group_id.serialize().len(), 32);
 
     let params = master_key.derive_secret_params();
-    assert_eq!(params.serialize().len(), 32);
+    assert_eq!(params.serialize_master_key().len(), 32);
 
     let master_key_bytes = master_key.serialize();
     let master_key_2 = WasmGroupMasterKey::from_bytes(&master_key_bytes).unwrap();
@@ -743,4 +743,139 @@ async fn test_uuid_utilities() {
     let uuid_str = uuid_to_string(&uuid_bytes).unwrap();
     let recovered = uuid_from_string(&uuid_str).unwrap();
     assert_eq!(recovered, uuid_bytes);
+}
+
+#[wasm_bindgen_test]
+async fn test_scannable_fingerprint_cross_perspective() {
+    let (alice_identity, _) = create_test_identity();
+    let (bob_identity, _) = create_test_identity();
+
+    let alice_uuid = "00000000-0000-0000-0000-00000000000A";
+    let bob_uuid = "00000000-0000-0000-0000-00000000000B";
+
+    // Bob's QR code: Bob's view (local=Bob, remote=Alice).
+    let sn_bob = generate_safety_number(
+        bob_uuid.to_string(),
+        &bob_identity.public_key(),
+        alice_uuid.to_string(),
+        &alice_identity.public_key(),
+    )
+    .expect("Bob failed to gen SN");
+
+    // Positive: Alice scans Bob's QR and verifies against HER view.
+    let valid = verify_scannable_fingerprint(
+        &sn_bob.scannable(),
+        alice_uuid.to_string(),
+        &alice_identity.public_key(),
+        bob_uuid.to_string(),
+        &bob_identity.public_key(),
+    )
+    .expect("Cross-perspective verify failed");
+    assert!(valid, "A scanning B's QR must verify");
+
+    // Negative: tampered payload must not verify.
+    let mut tampered = sn_bob.scannable();
+    let n = tampered.len();
+    tampered[n - 1] ^= 0x01;
+    let result = verify_scannable_fingerprint(
+        &tampered,
+        alice_uuid.to_string(),
+        &alice_identity.public_key(),
+        bob_uuid.to_string(),
+        &bob_identity.public_key(),
+    );
+    match result {
+        Ok(v) => assert!(!v, "Tampered payload must not verify"),
+        Err(e) => assert_eq!(js_error_code(&e), "FingerprintParsingError"),
+    }
+
+    // Negative: wrong version throws FingerprintVersionMismatch.
+    // CombinedFingerprints protobuf: field 1 (version) is a varint, so a v2
+    // encoding starts with 0x08 0x02; rewriting the version byte to 1 gives a
+    // well-formed payload with a mismatched version.
+    let mut wrong_version = sn_bob.scannable();
+    assert_eq!(&wrong_version[..2], &[0x08, 0x02], "expected v2 varint header");
+    wrong_version[1] = 0x01;
+    let err = verify_scannable_fingerprint(
+        &wrong_version,
+        alice_uuid.to_string(),
+        &alice_identity.public_key(),
+        bob_uuid.to_string(),
+        &bob_identity.public_key(),
+    )
+    .expect_err("Version mismatch must throw");
+    assert_eq!(js_error_code(&err), "FingerprintVersionMismatch");
+
+    // Negative: garbage payload throws FingerprintParsingError.
+    let err = verify_scannable_fingerprint(
+        &[0xFF, 0xFF, 0xFF],
+        alice_uuid.to_string(),
+        &alice_identity.public_key(),
+        bob_uuid.to_string(),
+        &bob_identity.public_key(),
+    )
+    .expect_err("Garbage payload must throw");
+    assert_eq!(js_error_code(&err), "FingerprintParsingError");
+
+    // Negative: swapped identities (Alice verifies against the WRONG contact)
+    // must not verify.
+    let (mallory_identity, _) = create_test_identity();
+    let valid = verify_scannable_fingerprint(
+        &sn_bob.scannable(),
+        alice_uuid.to_string(),
+        &alice_identity.public_key(),
+        "00000000-0000-0000-0000-00000000000C".to_string(),
+        &mallory_identity.public_key(),
+    )
+    .expect("verify should return false, not throw");
+    assert!(!valid, "Wrong contact identity must not verify");
+}
+
+#[wasm_bindgen_test]
+async fn test_identity_proof_of_possession() {
+    let (identity, _) = create_test_identity();
+    let message = b"re-key authorisation challenge 0123456789";
+
+    // Round-trip.
+    let signature = sign_with_identity_key(&identity.private_key(), message)
+        .expect("signing failed");
+    assert_eq!(signature.len(), 64, "XEdDSA signature is 64 bytes");
+    assert!(verify_identity_signature(
+        &identity.public_key(),
+        message,
+        &signature
+    ));
+
+    // Negative: wrong message.
+    assert!(!verify_identity_signature(
+        &identity.public_key(),
+        b"different challenge",
+        &signature
+    ));
+
+    // Negative: wrong key.
+    let (other_identity, _) = create_test_identity();
+    assert!(!verify_identity_signature(
+        &other_identity.public_key(),
+        message,
+        &signature
+    ));
+
+    // Negative: malformed signature must return false, not throw.
+    assert!(!verify_identity_signature(
+        &identity.public_key(),
+        message,
+        &[0u8; 8]
+    ));
+}
+
+#[wasm_bindgen_test]
+async fn test_group_secret_params_master_key_getter() {
+    // L1: the getter is explicitly the 32-byte master key, and it must agree
+    // with the master key it was derived from.
+    let master_key = WasmGroupMasterKey::generate();
+    let params = master_key.derive_secret_params();
+    let exported = params.serialize_master_key();
+    assert_eq!(exported.len(), 32);
+    assert_eq!(exported, master_key.serialize());
 }

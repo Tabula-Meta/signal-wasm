@@ -1,6 +1,6 @@
 [package]
 name = "signal-wasm"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Signal Protocol compiled to WebAssembly for browser-based E2EE messaging"
 license = "AGPL-3.0-only"
@@ -29,10 +29,7 @@ serde_json = { version = "1.0.45" }
 # Core libsignal crates (git dependencies for independent build)
 # Pinned to libsignal main @ b5121d0 (2026-07-16), workspace version 0.97.4.
 libsignal-protocol = { git = "https://github.com/signalapp/libsignal", rev = "b5121d07c72f9e631f178d907ca892587f64f9e2" }
-libsignal-core = { git = "https://github.com/signalapp/libsignal", rev = "b5121d07c72f9e631f178d907ca892587f64f9e2" }
-signal-crypto = { git = "https://github.com/signalapp/libsignal", rev = "b5121d07c72f9e631f178d907ca892587f64f9e2" }
 zkgroup = { git = "https://github.com/signalapp/libsignal", rev = "b5121d07c72f9e631f178d907ca892587f64f9e2" }
-zkcredential = { git = "https://github.com/signalapp/libsignal", rev = "b5121d07c72f9e631f178d907ca892587f64f9e2" }
 
 # Randomness for browser (uses Web Crypto API)
 # We need both v0.2 and v0.3 due to a "diamond dependency" in the upstream libsignal ecosystem:

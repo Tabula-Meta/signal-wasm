@@ -4,7 +4,7 @@
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![WASM](https://img.shields.io/badge/WASM-Ready-green)](https://webassembly.org/)
-[![Version](https://img.shields.io/badge/Version-0.3.0-blue)](Cargo.toml)
+[![Version](https://img.shields.io/badge/Version-0.5.0-blue)](Cargo.toml)
 
 ## Features
 
@@ -182,6 +182,10 @@ Every rejected promise throws a real JS `Error` with:
 | `DuplicatedMessage` | Message counter already seen (replay/duplicate; usually benign) |
 | `UntrustedIdentity` | Sender identity key not trusted for the address |
 | `InvalidKyberPreKeyId` | Referenced Kyber pre-key id is invalid/missing |
+| `InvalidPreKeyId` | Referenced pre-key id is invalid/missing |
+| `InvalidSignedPreKeyId` | Referenced signed pre-key id is invalid/missing |
+| `FingerprintVersionMismatch` | Scanned QR fingerprint version differs from ours (thrown by `verifyScannableFingerprint`) |
+| `FingerprintParsingError` | Scanned QR fingerprint payload is undecodable or malformed |
 | `Generic` | Everything else, including wrapper-side validation failures |
 
 Note: `String(err)` now yields `"Error: SignalError: …"` (standard `Error`
@@ -193,8 +197,19 @@ unaffected.
 
 | Function | Returns | Description |
 |----------|---------|-------------|
-| `generateSafetyNumber(localUuid, localIdentityKey, contactUuid, contactIdentityKey)` | `WasmSafetyNumber` | Generate a safety number fingerprint |
-| `verifySafetyNumber(scanned, localUuid, localIdentityKey, contactUuid, contactIdentityKey)` | `boolean` | Verify a scanned safety number |
+| `generateSafetyNumber(localUuid, localIdentityKey, contactUuid, contactIdentityKey)` | `WasmSafetyNumber` | Generate a safety number fingerprint (`displayable` string + `scannable` QR payload) |
+| `verifyScannableFingerprint(scanned, localUuid, localIdentityKey, contactUuid, contactIdentityKey)` | `boolean` | **Since 0.5.0.** Canonical cross-perspective QR verification (`ScannableFingerprint::compare`): checks their.local == our.remote AND their.remote == our.local in constant time. Throws `FingerprintVersionMismatch` on version mismatch, `FingerprintParsingError` on an undecodable payload |
+| ~~`verifySafetyNumber(...)`~~ | `boolean` | **Deprecated since 0.5.0.** Recomputes our own fingerprint and byte-compares — it can never validate a cross-perspective scan. Kept for API compatibility; use `verifyScannableFingerprint` |
+
+### Identity Proof-of-Possession
+
+Server-verifiable proof-of-possession of an identity key (e.g. to authorise a
+re-key). XEdDSA over the X25519 identity key, canonical libsignal signing.
+
+| Function | Returns | Description |
+|----------|---------|-------------|
+| `signWithIdentityKey(identityPrivateKey, message)` | `Uint8Array` | Sign `message` with the identity private key (64-byte signature) |
+| `verifyIdentitySignature(identityPublicKey, message, signature)` | `boolean` | Constant-time verification; `false` for wrong key/message or malformed signature |
 
 ### GV2 (Private Groups)
 
@@ -202,7 +217,7 @@ unaffected.
 |-------|---------|
 | `WasmGroupMasterKey` | `generate()`, `from_bytes(bytes)`, `derive_identifier()`, `derive_secret_params()` |
 | `WasmGroupIdentifier` | `serialize` |
-| `WasmGroupSecretParams` | `serialize`, `get_identifier()` |
+| `WasmGroupSecretParams` | `serialize_master_key` (since 0.5.0; returns the 32-byte **master key**, not the full params encoding), `get_identifier()` |
 
 ### Data Structures
 
@@ -270,10 +285,33 @@ wasm-pack build --target web --scope getmaapp
 - ✅ 24-bit PreKey ID wrapping (matches Signal behaviour)
 - ✅ CSPRNG via Web Crypto API
 - ✅ Generic error messages in production builds
+- ✅ Secret-bearing wrapper buffers zeroised on drop (`zeroize::Zeroizing`) — see caveats below
+- ✅ `log_to_console` debug helper is compiled out of release builds
 
-### ⚠️ Memory Safety Caveat
+### Memory Safety & Zeroization
 
-While this library uses `Zeroizing` to clear secrets from WASM memory when they are dropped, **keys exported to JavaScript are subject to the browser's garbage collector**. We cannot guarantee that secrets moved into JS memory (e.g., via `identityKeyPair.private_key.serialize()`) are securely erased. Treat exported keys with extreme care.
+- Secret-bearing buffers owned by the wrapper are wrapped in
+  `zeroize::Zeroizing` and are overwritten with zeroes on drop: serialized
+  PreKey/SignedPreKey/KyberPreKey records (each contains the private half),
+  and the group master-key bytes held by `WasmGroupMasterKey` /
+  `WasmGroupSecretParams`.
+- **Limitations.** The long-term identity key itself is a libsignal
+  `PrivateKey` — an upstream `Copy` type over a `[u8; 32]` that libsignal does
+  not zero on drop, so the wrapper cannot guarantee erasure of the identity
+  scalar while it lives in WASM linear memory. And **any bytes exported to
+  JavaScript** (via `serialize()`, getters, etc.) are copies in JS memory
+  subject to the browser's garbage collector; they cannot be erased from
+  Rust. Treat exported keys with extreme care.
+
+### ⚠️ Panics Brick the Instance
+
+Release builds use `panic = "abort"` (there is no unwinding across the WASM
+boundary). A Rust panic therefore **permanently bricks the WASM instance** —
+every subsequent call traps — and surfaces to JS as the flattened
+`SignalError: Operation failed` with no recoverable detail (the M25
+error-flattening residual). A page reload (fresh instance) is the only
+remedy. Debug builds register `console_error_panic_hook` so panics are
+visible in the console during development.
 
 ## Licence
 

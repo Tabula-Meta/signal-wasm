@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-25
+
+Engine-side items of the Ma E2EE tracker: canonical cross-perspective
+safety-number verification, identity proof-of-possession, and the M25 hygiene
+sweep. libsignal remains pinned to `main` @
+[`b5121d0`](https://github.com/signalapp/libsignal/commit/b5121d07c72f9e631f178d907ca892587f64f9e2) — no vendored code changed.
+
+### Added
+- **`verifyScannableFingerprint(scanned, localUuid, localIdentityKey, contactUuid, contactIdentityKey)`**:
+  the web half of fixing safety-number verification. Uses the canonical
+  `ScannableFingerprint::compare` semantics (libsignal
+  `rust/protocol/src/fingerprint.rs`): decodes the scanned CombinedFingerprints,
+  enforces version equality, and requires their.local == our.remote AND
+  their.remote == our.local, in constant time. The old `verifySafetyNumber`
+  recomputed OUR OWN fingerprint and byte-compared, so it could never validate
+  a cross-perspective scan (the scanned QR encodes the OTHER party's
+  fingerprints with local/remote swapped).
+  - New error codes: **`FingerprintVersionMismatch`** (their version ≠ ours)
+    and **`FingerprintParsingError`** (undecodable/malformed scanned payload).
+- **`signWithIdentityKey(identityPrivateKey, message)` → `Uint8Array`** and
+  **`verifyIdentitySignature(identityPublicKey, message, signature)` → `boolean`**:
+  identity proof-of-possession (XEdDSA over the X25519 identity key, canonical
+  `PrivateKey::calculate_signature` / `PublicKey::verify_signature`), for
+  server-verifiable re-key authorisation. Verification is constant-time and
+  returns `false` (never throws) for wrong key/message or malformed signature.
+- New error codes **`InvalidPreKeyId`** and **`InvalidSignedPreKeyId`**
+  (previously folded into `Generic`).
+- Zeroization (M25a): the previously declared-but-unused `zeroize` dependency
+  is now real. Serialized PreKey/SignedPreKey/KyberPreKey records (which
+  contain the private half) and the group master-key bytes in
+  `WasmGroupMasterKey` / `WasmGroupSecretParams` are held in
+  `zeroize::Zeroizing` and overwritten on drop. Honest limits, documented in
+  the README: the libsignal identity `PrivateKey` is an upstream `Copy` type
+  that is not zeroed, and any bytes exported to JS are GC-managed copies that
+  cannot be erased from Rust.
+
+### Changed
+- **BREAKING (minor)**: `WasmGroupSecretParams.serialize` is renamed to
+  **`serialize_master_key`** (L1). It always returned the 32-byte master key,
+  not the 289-byte group params encoding; the explicit name stops future
+  callers grabbing the wrong thing. The getter was unreferenced downstream.
+- **BREAKING (minor)**: `log_to_console` is no longer exported from release
+  builds — it is now gated behind `#[cfg(debug_assertions)]` (M25b).
+- `has_session` and the `export_pre_key` / `export_signed_pre_key` /
+  `export_kyber_pre_key` stores no longer swallow store errors as
+  falsey/`None` (L4). Only the canonical not-found sentinel
+  (`InvalidPreKeyId` / `InvalidSignedPreKeyId` / `InvalidKyberPreKeyId`) maps
+  to `None`; any other store error is surfaced as a typed JS `Error`.
+- `verifySafetyNumber` is deprecated (doc comment) in favour of
+  `verifyScannableFingerprint`; kept for API compatibility.
+
+### Removed
+- Unused direct dependencies `libsignal-core`, `signal-crypto`, and
+  `zkcredential` (M25c). They remain in the tree transitively via
+  `libsignal-protocol` / `zkgroup`, so feature unification is unaffected;
+  verified with `cargo check --all-targets`.
+
+### Notes
+- Release builds keep `panic = "abort"` (correct for wasm: no unwinding across
+  the boundary). README now documents that a Rust panic permanently bricks the
+  instance and surfaces as the flattened `SignalError: Operation failed`
+  (the M25 error-flattening residual); `console_error_panic_hook` remains
+  registered at init in debug builds.
+
 ## [0.4.0] - 2026-07-17
 
 Security hardening release. libsignal remains
