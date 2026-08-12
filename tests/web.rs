@@ -200,7 +200,7 @@ async fn test_session_establishment_and_messaging() {
     .await
     .expect("Decryption failed");
 
-    assert_eq!(decrypted, message_body);
+    assert_eq!(decrypted.plaintext(), message_body);
 
     // 3. Bob Replies (Standard Message)
     let reply_body = b"Ack!";
@@ -230,7 +230,11 @@ async fn test_session_establishment_and_messaging() {
     .await
     .expect("Reply decryption failed");
 
-    assert_eq!(reply_decrypted, reply_body);
+    assert_eq!(reply_decrypted.plaintext(), reply_body);
+    // A Whisper (non-prekey) decrypt consumes nothing.
+    assert!(reply_decrypted.kyber_pre_key_id().is_none());
+    assert!(reply_decrypted.signed_pre_key_id().is_none());
+    assert!(reply_decrypted.one_time_pre_key_id().is_none());
 }
 
 #[wasm_bindgen_test]
@@ -683,7 +687,7 @@ async fn test_persistence() {
     .await
     .unwrap();
 
-    assert_eq!(decrypted2, b"Msg 2");
+    assert_eq!(decrypted2.plaintext(), b"Msg 2");
 }
 
 #[wasm_bindgen_test]
@@ -878,4 +882,260 @@ async fn test_group_secret_params_master_key_getter() {
     let exported = params.serialize_master_key();
     assert_eq!(exported.len(), 32);
     assert_eq!(exported, master_key.serialize());
+}
+
+// ============================================================================
+// 0.6.0: consumed pre-key surfacing (M27) + durable kyber anti-replay (L16)
+// ============================================================================
+
+/// Shared Alice→Bob fixture. Bob has signed prekey 1 and kyber prekey 1, and
+/// optionally one-time EC prekey 1; Alice has processed Bob's bundle.
+struct PreKeyFixture {
+    alice_address: WasmProtocolAddress,
+    bob_address: WasmProtocolAddress,
+    alice_session_store: WasmInMemSessionStore,
+    alice_identity_store: WasmInMemIdentityKeyStore,
+    bob_identity: WasmIdentityKeyPair,
+    bob_reg_id: u32,
+    bob_session_store: WasmInMemSessionStore,
+    bob_identity_store: WasmInMemIdentityKeyStore,
+    bob_prekey_store: WasmInMemPreKeyStore,
+    bob_signed_prekey_store: WasmInMemSignedPreKeyStore,
+    bob_kyber_prekey_store: WasmInMemKyberPreKeyStore,
+}
+
+async fn establish_prekey_session(with_one_time_ec: bool) -> PreKeyFixture {
+    let alice_uuid = "00000000-0000-0000-0000-00000000000A";
+    let bob_uuid = "00000000-0000-0000-0000-00000000000B";
+
+    let (alice_identity, alice_reg_id) = create_test_identity();
+    let alice_session_store = WasmInMemSessionStore::new();
+    let alice_identity_store = WasmInMemIdentityKeyStore::new(&alice_identity, alice_reg_id);
+    let alice_address = WasmProtocolAddress::new(alice_uuid.to_string(), 1).unwrap();
+
+    let (bob_identity, bob_reg_id) = create_test_identity();
+    let bob_session_store = WasmInMemSessionStore::new();
+    let bob_identity_store = WasmInMemIdentityKeyStore::new(&bob_identity, bob_reg_id);
+    let mut bob_prekey_store = WasmInMemPreKeyStore::new();
+    let mut bob_signed_prekey_store = WasmInMemSignedPreKeyStore::new();
+    let mut bob_kyber_prekey_store = WasmInMemKyberPreKeyStore::new();
+    let bob_address = WasmProtocolAddress::new(bob_uuid.to_string(), 1).unwrap();
+
+    let bob_spk = generate_signed_pre_key(1, &bob_identity, &mut bob_signed_prekey_store).await.unwrap();
+    let bob_kpk = generate_kyber_pre_key(1, &bob_identity, &mut bob_kyber_prekey_store).await.unwrap();
+
+    let (prekey_id, prekey) = if with_one_time_ec {
+        let keys = generate_pre_keys(1, 1, &mut bob_prekey_store).await.unwrap();
+        (Some(keys[0].id()), Some(keys[0].public_key()))
+    } else {
+        (None, None)
+    };
+
+    let bob_identity_pk = WasmPublicKey::deserialize(&bob_identity.public_key().serialize()).unwrap();
+
+    let mut fixture = PreKeyFixture {
+        alice_address,
+        bob_address,
+        alice_session_store,
+        alice_identity_store,
+        bob_identity,
+        bob_reg_id,
+        bob_session_store,
+        bob_identity_store,
+        bob_prekey_store,
+        bob_signed_prekey_store,
+        bob_kyber_prekey_store,
+    };
+
+    process_pre_key_bundle(
+        &fixture.bob_address,
+        &fixture.alice_address,
+        fixture.bob_reg_id,
+        &bob_identity_pk,
+        bob_spk.id(),
+        &WasmPublicKey::deserialize(&bob_spk.public_key()).unwrap(),
+        &bob_spk.signature(),
+        prekey_id,
+        prekey,
+        bob_kpk.id(),
+        &bob_kpk.public_key(),
+        &bob_kpk.signature(),
+        &mut fixture.alice_session_store,
+        &mut fixture.alice_identity_store,
+    )
+    .await
+    .expect("Alice failed to process bundle");
+
+    fixture
+}
+
+/// Alice's first message to Bob (a PreKeySignalMessage) for fixture `f`.
+async fn alice_first_message(f: &mut PreKeyFixture, body: &[u8]) -> WasmCiphertext {
+    let ct = encrypt_message(
+        body,
+        &f.bob_address,
+        &f.alice_address,
+        &mut f.alice_session_store,
+        &mut f.alice_identity_store,
+    )
+    .await
+    .expect("Encryption failed");
+    assert_eq!(ct.message_type(), 3); // PreKeyMessage
+    ct
+}
+
+/// Bob decrypts Alice's message using his fixture stores.
+async fn bob_decrypts(f: &mut PreKeyFixture, ct: &WasmCiphertext) -> Result<WasmDecryptResult, JsValue> {
+    decrypt_message(
+        &ct.body(),
+        ct.message_type(),
+        &f.alice_address,
+        &f.bob_address,
+        &mut f.bob_session_store,
+        &mut f.bob_identity_store,
+        &mut f.bob_prekey_store,
+        &f.bob_signed_prekey_store,
+        &mut f.bob_kyber_prekey_store,
+    )
+    .await
+}
+
+#[wasm_bindgen_test]
+async fn test_decrypt_reports_consumed_prekey_ids() {
+    let mut f = establish_prekey_session(true).await;
+    let ct = alice_first_message(&mut f, b"first").await;
+
+    let result = bob_decrypts(&mut f, &ct).await.expect("Decryption failed");
+
+    assert_eq!(result.plaintext(), b"first");
+    // The prekey message consumed one-time EC prekey 1 and kyber prekey 1,
+    // paired with signed prekey 1.
+    assert_eq!(result.one_time_pre_key_id(), Some(1));
+    assert_eq!(result.kyber_pre_key_id(), Some(1));
+    assert_eq!(result.signed_pre_key_id(), Some(1));
+
+    // The engine removed the one-time EC key itself; the kyber record remains
+    // (one-time vs last-resort deletion is the TS layer's job, per the
+    // KyberPreKeyStore trait contract).
+    assert!(f.bob_prekey_store.export_pre_key(1).await.unwrap().is_none());
+    assert!(f.bob_kyber_prekey_store.export_kyber_pre_key(1).await.unwrap().is_some());
+}
+
+#[wasm_bindgen_test]
+async fn test_replayed_prekey_message_same_process_is_duplicated() {
+    let mut f = establish_prekey_session(true).await;
+    let ct = alice_first_message(&mut f, b"replay me").await;
+
+    bob_decrypts(&mut f, &ct).await.expect("First decryption failed");
+
+    // Same-process replay: the session established from this base key is still
+    // current, so the engine short-circuits before the kyber mark and the
+    // inner message fails ratchet replay detection instead.
+    let err = bob_decrypts(&mut f, &ct)
+        .await
+        .err()
+        .expect("Replay must be rejected");
+    assert_eq!(js_error_code(&err), "DuplicatedMessage");
+}
+
+#[wasm_bindgen_test]
+async fn test_kyber_usage_export_import_roundtrip() {
+    let mut f = establish_prekey_session(true).await;
+    let ct = alice_first_message(&mut f, b"mark me").await;
+    bob_decrypts(&mut f, &ct).await.expect("Decryption failed");
+
+    let usage = f.bob_kyber_prekey_store.export_kyber_usage();
+    // version (1) + count (4) + one 41-byte record
+    assert_eq!(usage.len(), 46);
+    assert_eq!(usage[0], 1);
+
+    // Import into a fresh store; union semantics make re-import a no-op.
+    let mut restored = WasmInMemKyberPreKeyStore::new();
+    restored.import_kyber_usage(&usage).expect("Import failed");
+    restored.import_kyber_usage(&usage).expect("Re-import must be idempotent");
+    assert_eq!(restored.export_kyber_usage().len(), 46);
+
+    // Malformed exports are hard errors, never silent drops.
+    assert!(restored.import_kyber_usage(&[]).is_err());
+    assert!(restored.import_kyber_usage(&[2, 0, 0, 0, 0]).is_err()); // version
+    assert!(restored.import_kyber_usage(&[1, 0, 0, 0, 1]).is_err()); // short payload
+    let mut bad_key = vec![1u8, 0, 0, 0, 1];
+    bad_key.extend_from_slice(&[0u8; 41]);
+    assert!(restored.import_kyber_usage(&bad_key).is_err()); // invalid base key
+}
+
+/// L16: a replayed PreKeySignalMessage against a live last-resort kyber key
+/// must still be rejected after a restart — but only if the anti-replay memory
+/// was persisted and re-imported.
+#[wasm_bindgen_test]
+async fn test_kyber_replay_rejected_across_restart() {
+    // Last-resort-only bundle: no one-time EC key, mirroring the M27 fallback
+    // path where one-time keys are exhausted.
+    let mut f = establish_prekey_session(false).await;
+    let ct = alice_first_message(&mut f, b"last resort").await;
+
+    let first = bob_decrypts(&mut f, &ct).await.expect("First decryption failed");
+    assert_eq!(first.plaintext(), b"last resort");
+    assert_eq!(first.kyber_pre_key_id(), Some(1));
+    assert_eq!(first.one_time_pre_key_id(), None); // no one-time EC key in play
+
+    // What the TS layer persists: the kyber record, the signed prekey, and
+    // the usage set.
+    let kyber_record = f
+        .bob_kyber_prekey_store
+        .export_kyber_pre_key(1)
+        .await
+        .unwrap()
+        .expect("Kyber record missing");
+    let signed_record = f
+        .bob_signed_prekey_store
+        .export_signed_pre_key(1)
+        .await
+        .unwrap()
+        .expect("Signed prekey missing");
+    let usage = f.bob_kyber_prekey_store.export_kyber_usage();
+
+    // Control — "restart" WITHOUT the usage import: the replay decapsulates
+    // again. This is the pre-0.6.0 hole; if this ever fails, the fix test
+    // below proves nothing.
+    let mut vulnerable_kyber = WasmInMemKyberPreKeyStore::new();
+    vulnerable_kyber.import_kyber_pre_key(1, &kyber_record).await.unwrap();
+    let mut control_signed = WasmInMemSignedPreKeyStore::new();
+    control_signed.import_signed_pre_key(1, &signed_record).await.unwrap();
+    let replay = decrypt_message(
+        &ct.body(),
+        ct.message_type(),
+        &f.alice_address,
+        &f.bob_address,
+        &mut WasmInMemSessionStore::new(),
+        &mut WasmInMemIdentityKeyStore::new(&f.bob_identity, f.bob_reg_id),
+        &mut WasmInMemPreKeyStore::new(),
+        &control_signed,
+        &mut vulnerable_kyber,
+    )
+    .await;
+    assert!(replay.is_ok(), "control replay should succeed without usage import");
+
+    // The fix — "restart" WITH the usage import: the replay is rejected.
+    let mut patched_kyber = WasmInMemKyberPreKeyStore::new();
+    patched_kyber.import_kyber_pre_key(1, &kyber_record).await.unwrap();
+    patched_kyber.import_kyber_usage(&usage).expect("Usage import failed");
+    let mut patched_signed = WasmInMemSignedPreKeyStore::new();
+    patched_signed.import_signed_pre_key(1, &signed_record).await.unwrap();
+
+    let err = decrypt_message(
+        &ct.body(),
+        ct.message_type(),
+        &f.alice_address,
+        &f.bob_address,
+        &mut WasmInMemSessionStore::new(),
+        &mut WasmInMemIdentityKeyStore::new(&f.bob_identity, f.bob_reg_id),
+        &mut WasmInMemPreKeyStore::new(),
+        &patched_signed,
+        &mut patched_kyber,
+    )
+    .await
+    .err()
+    .expect("Replay with persisted usage must be rejected");
+    assert_eq!(js_error_code(&err), "ReusedKyberBaseKey");
 }

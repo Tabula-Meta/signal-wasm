@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-12
+
+PQXDH hardening: consumed one-time pre-key surfacing (M27) and durable kyber
+anti-replay memory (L16). Both are parity with Signal's own clients, not extra
+caution — the `KyberPreKeyStore` trait contract (`libsignal
+rust/protocol/src/storage/traits.rs:127`) requires clients to delete consumed
+one-time keys and to reject reused `(kyber, signed prekey, base key)` triples,
+and Signal-iOS / Signal-Desktop / Signal-Android all persist that state in
+their databases. libsignal remains pinned to `main` @
+[`b5121d0`](https://github.com/signalapp/libsignal/commit/b5121d07c72f9e631f178d907ca892587f64f9e2) — no vendored code changed.
+
+### Added
+- **`decryptMessage` now reports consumed one-time pre-key ids.** The engine
+  learns exactly which keys a prekey-message decrypt consumed (`pre_key_used`
+  in `rust/protocol/src/session_management.rs`) but upstream returns only the
+  plaintext; with JS-mediated durability the TS layer could never tombstone
+  them, so a consumed one-time kyber record was re-imported on next hydration
+  and its KEM private key resurrected across restarts. The wrapper-owned
+  stores now capture the engine's own store callbacks — the same call sites
+  Signal's clients persist from — and the ids cross the boundary.
+- **`InMemKyberPreKeyStore.export_kyber_usage()` / `import_kyber_usage(bytes)`**:
+  durable kyber anti-replay memory. Upstream `InMemKyberPreKeyStore` keeps
+  `base_keys_seen` private (`inmem.rs:203`), so the replay guard evaporated on
+  every reload: a replayed PreKeySignalMessage against a live last-resort key
+  decapsulated again after a restart. The set now exports for IndexedDB
+  persistence (version byte `1`, u32 BE count, then per record
+  `kyberId u32 BE ‖ signedPreKeyId u32 BE ‖ 33-byte base key`). Import is
+  union-with-dedup and validates every byte — unknown version, length
+  mismatch, or an invalid base key is a hard error, never a silent drop.
+- New error code **`ReusedKyberBaseKey`** for kyber replay rejections. The
+  matched detail string is wrapper-owned (the store constructs it), so this is
+  the one sanctioned exception to the "codes match on type, never on message"
+  rule; it lets callers distinguish replay rejection in release builds where
+  messages are flattened.
+
+### Changed
+- **BREAKING (minor)**: `decryptMessage` now returns **`WasmDecryptResult`**
+  instead of `Uint8Array`. Getters: `plaintext: Uint8Array`,
+  `kyberPreKeyId?: number`, `oneTimePreKeyId?: number`,
+  `signedPreKeyId?: number`. All id fields are `undefined` for Whisper
+  (non-prekey) decrypts and for prekey messages that decrypted against an
+  existing session. Migration: `const pt = await decryptMessage(...)` →
+  `const { plaintext } = await decryptMessage(...)`, then tombstone any
+  reported ids in your durable store.
+- `WasmInMemPreKeyStore` and `WasmInMemKyberPreKeyStore` are now backed by
+  wrapper-owned store implementations (the 0.4.0 `RemovableSenderKeyStore`
+  precedent) instead of upstream's InMem stores. The JS API is unchanged; the
+  engine-visible behaviour is byte-identical to upstream InMem (same
+  not-found sentinels, same "reused base key" replay check). Under concurrent
+  decrypts sharing one store set, `WasmDecryptResult` may report a superset of
+  the caller's own consumed ids — every reported id was genuinely consumed, so
+  tombstoning it is always safe.
+
+### Notes
+- Same-process replay of a prekey message is still caught by ratchet replay
+  detection (`DuplicatedMessage`): the engine promotes the existing session
+  for that base key and never reaches the kyber mark. `ReusedKyberBaseKey`
+  fires exactly where `DuplicatedMessage` cannot reach — after a restart or
+  session reset with a live last-resort key.
+- The iOS half of both items needs the parallel Swift bridge surface; tracked
+  separately in the Ma E2EE tracker (SIGNAL.md §16a #10).
+
 ## [0.5.0] - 2026-07-25
 
 Engine-side items of the Ma E2EE tracker: canonical cross-perspective
@@ -264,7 +326,9 @@ const ciphertext = await encryptMessage(plaintext, recipientAddress, localAddres
 - State persistence for IndexedDB
 - Complete TypeScript definitions
 
-[Unreleased]: https://github.com/getmaapp/signal-wasm/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/getmaapp/signal-wasm/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/getmaapp/signal-wasm/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/getmaapp/signal-wasm/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/getmaapp/signal-wasm/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/getmaapp/signal-wasm/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/getmaapp/signal-wasm/compare/v0.1.2...v0.2.0

@@ -41,14 +41,14 @@ use libsignal_protocol::{
     IdentityKey,
     IdentityKeyPair,
     InMemIdentityKeyStore,
-    InMemKyberPreKeyStore,
-    InMemPreKeyStore,
     InMemSessionStore,
     InMemSignedPreKeyStore,
     KeyPair,
+    KyberPreKeyId,
     KyberPreKeyRecord,
     KyberPreKeyStore,
     PreKeyBundle,
+    PreKeyId,
     PreKeyRecord,
     PreKeySignalMessage,
     PreKeyStore,
@@ -62,6 +62,7 @@ use libsignal_protocol::{
     SessionStore,
     SignalMessage,
     SignalProtocolError,
+    SignedPreKeyId,
     SignedPreKeyRecord,
     SignedPreKeyStore,
     Timestamp,
@@ -93,6 +94,19 @@ const GROUP_MASTER_KEY_SIZE: usize = 32;
 
 /// Standard size of an attachment encryption key.
 const ATTACHMENT_KEY_SIZE: usize = 64;
+
+/// Current version of the kyber anti-replay usage export format.
+const KYBER_USAGE_EXPORT_VERSION: u8 = 1;
+
+/// Serialized size of one usage record: kyberId (4) || signedPreKeyId (4) ||
+/// 33-byte compressed sender base key.
+const KYBER_USAGE_RECORD_SIZE: usize = 41;
+
+/// Detail string for kyber base-key replay rejections, mirroring upstream
+/// (`rust/protocol/src/storage/inmem.rs` "reused base key"). The wrapper's own
+/// store constructs this error, so `error_code` may match it exactly — this is
+/// the one sanctioned exception to the "match on type, never on message" rule.
+const REUSED_BASE_KEY_MESSAGE: &str = "reused base key";
 
 // ============================================================================
 // SECTION 1: Initialisation
@@ -131,6 +145,13 @@ fn error_code(e: &SignalProtocolError) -> &'static str {
         SignalProtocolError::InvalidKyberPreKeyId => "InvalidKyberPreKeyId",
         SignalProtocolError::InvalidPreKeyId => "InvalidPreKeyId",
         SignalProtocolError::InvalidSignedPreKeyId => "InvalidSignedPreKeyId",
+        // Kyber anti-replay rejection. The string is wrapper-owned (see
+        // REUSED_BASE_KEY_MESSAGE), so this match is exact, not sniffing.
+        SignalProtocolError::InvalidMessage(CiphertextMessageType::PreKey, msg)
+            if msg.as_str() == REUSED_BASE_KEY_MESSAGE =>
+        {
+            "ReusedKyberBaseKey"
+        }
         _ => "Generic",
     }
 }
@@ -439,14 +460,68 @@ impl Default for WasmInMemSessionStore {
     }
 }
 
+/// X25519 one-time pre-key store that records engine-side consumption.
+///
+/// The engine deletes a consumed one-time pre-key by calling
+/// `PreKeyStore::remove_pre_key` during prekey-message decrypt
+/// (`rust/protocol/src/session_management.rs`), but upstream
+/// `InMemPreKeyStore` keeps that removal invisible to JS — the TS layer never
+/// learns which id was consumed, so it cannot tombstone the key in the durable
+/// store and the record resurrects on next hydration. Signal's own clients
+/// never have this problem: their store callbacks ARE app code (Signal-iOS
+/// `PreKeyStore.swift:199`). This store implements the public trait over its
+/// own map (the 0.4.0 `RemovableSenderKeyStore` precedent) and records every
+/// engine-driven removal for `decryptMessage` to report.
+struct ConsumptionTrackingPreKeyStore {
+    records: HashMap<PreKeyId, PreKeyRecord>,
+    /// One-time ids the engine removed since the last clear/take.
+    consumed: Vec<u32>,
+}
+
+impl ConsumptionTrackingPreKeyStore {
+    fn new() -> Self {
+        Self {
+            records: HashMap::new(),
+            consumed: Vec::new(),
+        }
+    }
+}
+
+#[async_trait(?Send)]
+impl PreKeyStore for ConsumptionTrackingPreKeyStore {
+    async fn get_pre_key(&self, prekey_id: PreKeyId) -> Result<PreKeyRecord, SignalProtocolError> {
+        self.records
+            .get(&prekey_id)
+            .cloned()
+            .ok_or(SignalProtocolError::InvalidPreKeyId)
+    }
+
+    async fn save_pre_key(
+        &mut self,
+        prekey_id: PreKeyId,
+        record: &PreKeyRecord,
+    ) -> Result<(), SignalProtocolError> {
+        self.records.insert(prekey_id, record.clone());
+        Ok(())
+    }
+
+    async fn remove_pre_key(&mut self, prekey_id: PreKeyId) -> Result<(), SignalProtocolError> {
+        // Record only genuine removals — a missing id was never consumable.
+        if self.records.remove(&prekey_id).is_some() {
+            self.consumed.push(u32::from(prekey_id));
+        }
+        Ok(())
+    }
+}
+
 #[wasm_bindgen]
-pub struct WasmInMemPreKeyStore(InMemPreKeyStore);
+pub struct WasmInMemPreKeyStore(ConsumptionTrackingPreKeyStore);
 
 #[wasm_bindgen]
 impl WasmInMemPreKeyStore {
     #[wasm_bindgen(constructor)]
     pub fn new() -> WasmInMemPreKeyStore {
-        WasmInMemPreKeyStore(InMemPreKeyStore::new())
+        WasmInMemPreKeyStore(ConsumptionTrackingPreKeyStore::new())
     }
 
     #[wasm_bindgen]
@@ -514,14 +589,150 @@ impl Default for WasmInMemSignedPreKeyStore {
     }
 }
 
+/// Kyber pre-key store with exportable anti-replay memory.
+///
+/// Upstream `InMemKyberPreKeyStore` guards against replayed
+/// PreKeySignalMessages via a private `base_keys_seen` map
+/// (`rust/protocol/src/storage/inmem.rs:203`): a sender base key already seen
+/// for a `(kyber id, signed prekey id)` pair fails the decrypt with "reused
+/// base key". That map has no accessor, so with JS-mediated durability it
+/// evaporates on every reload — after a restart a replayed prekey message
+/// against a live last-resort key decapsulates again (L16). Signal's own
+/// clients persist this set: Signal-iOS inserts a `KyberPreKeyUseRecord` into
+/// GRDB and throws on the unique-constraint hit (`PreKeyStore.swift:199`);
+/// Signal-Desktop writes `kyberPreKey_triples` and rejects duplicates
+/// (`SignalProtocolStore.preload.ts:536`). This store implements the public
+/// trait over its own maps and adds export/import so the TS layer can persist
+/// the same guarantee.
+struct KyberUsageTrackingStore {
+    records: HashMap<KyberPreKeyId, KyberPreKeyRecord>,
+    /// (kyber id, signed prekey id) → sender base keys already seen.
+    base_keys_seen: HashMap<(u32, u32), Vec<PublicKey>>,
+    /// (kyber id, signed prekey id) pairs marked used since the last
+    /// clear/take — surfaced by `decryptMessage` (M27).
+    consumed: Vec<(u32, u32)>,
+}
+
+impl KyberUsageTrackingStore {
+    fn new() -> Self {
+        Self {
+            records: HashMap::new(),
+            base_keys_seen: HashMap::new(),
+            consumed: Vec::new(),
+        }
+    }
+
+    /// Serialize the seen set: version byte, u32 BE record count, then per
+    /// record `kyberId u32 BE || signedPreKeyId u32 BE || 33-byte base key`.
+    fn export_usage(&self) -> Vec<u8> {
+        let count: usize = self.base_keys_seen.values().map(Vec::len).sum();
+        let mut out = Vec::with_capacity(5 + count * KYBER_USAGE_RECORD_SIZE);
+        out.push(KYBER_USAGE_EXPORT_VERSION);
+        out.extend_from_slice(&(count as u32).to_be_bytes());
+        for ((kyber_id, signed_id), base_keys) in &self.base_keys_seen {
+            for base_key in base_keys {
+                out.extend_from_slice(&kyber_id.to_be_bytes());
+                out.extend_from_slice(&signed_id.to_be_bytes());
+                out.extend_from_slice(&base_key.serialize());
+            }
+        }
+        out
+    }
+
+    /// Merge an exported seen set back in. Every byte is validated — unknown
+    /// version, trailing/short data, or an invalid base key is a hard error,
+    /// because silently dropping anti-replay state is worse than failing.
+    fn import_usage(&mut self, bytes: &[u8]) -> Result<(), JsValue> {
+        if bytes.len() < 5 {
+            return Err(validation_error("Kyber usage export too short"));
+        }
+        if bytes[0] != KYBER_USAGE_EXPORT_VERSION {
+            return Err(validation_error(&format!(
+                "Unsupported kyber usage export version {}",
+                bytes[0]
+            )));
+        }
+        let count = u32::from_be_bytes(bytes[1..5].try_into().map_err(|_| {
+            validation_error("Kyber usage export header malformed")
+        })?) as usize;
+        let payload = &bytes[5..];
+        if payload.len() != count * KYBER_USAGE_RECORD_SIZE {
+            return Err(validation_error(&format!(
+                "Kyber usage export length mismatch: header says {} records, payload is {} bytes",
+                count,
+                payload.len()
+            )));
+        }
+        for record in payload.chunks_exact(KYBER_USAGE_RECORD_SIZE) {
+            let kyber_id = u32::from_be_bytes([record[0], record[1], record[2], record[3]]);
+            let signed_id = u32::from_be_bytes([record[4], record[5], record[6], record[7]]);
+            let base_key = PublicKey::deserialize(&record[8..]).map_err(|_| {
+                validation_error("Kyber usage export contains an invalid base key")
+            })?;
+            let seen = self.base_keys_seen.entry((kyber_id, signed_id)).or_default();
+            if !seen.contains(&base_key) {
+                seen.push(base_key);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[async_trait(?Send)]
+impl KyberPreKeyStore for KyberUsageTrackingStore {
+    async fn get_kyber_pre_key(
+        &self,
+        kyber_prekey_id: KyberPreKeyId,
+    ) -> Result<KyberPreKeyRecord, SignalProtocolError> {
+        self.records
+            .get(&kyber_prekey_id)
+            .cloned()
+            .ok_or(SignalProtocolError::InvalidKyberPreKeyId)
+    }
+
+    async fn save_kyber_pre_key(
+        &mut self,
+        kyber_prekey_id: KyberPreKeyId,
+        record: &KyberPreKeyRecord,
+    ) -> Result<(), SignalProtocolError> {
+        self.records.insert(kyber_prekey_id, record.clone());
+        Ok(())
+    }
+
+    /// Canonical replay check, identical to upstream InMem: the same base key
+    /// twice for a `(kyber id, signed prekey id)` pair fails the decrypt. The
+    /// trait contract leaves one-time-key deletion to the caller ("libsignal
+    /// makes no distinction between one-time and last-resort pre-keys",
+    /// `traits.rs:112`) — the TS layer owns that via the consumed id surfaced
+    /// by `decryptMessage`.
+    async fn mark_kyber_pre_key_used(
+        &mut self,
+        kyber_prekey_id: KyberPreKeyId,
+        ec_prekey_id: SignedPreKeyId,
+        base_key: &PublicKey,
+    ) -> Result<(), SignalProtocolError> {
+        let pair = (u32::from(kyber_prekey_id), u32::from(ec_prekey_id));
+        let seen = self.base_keys_seen.entry(pair).or_default();
+        if seen.contains(base_key) {
+            return Err(SignalProtocolError::InvalidMessage(
+                CiphertextMessageType::PreKey,
+                REUSED_BASE_KEY_MESSAGE.to_owned(),
+            ));
+        }
+        seen.push(*base_key);
+        self.consumed.push(pair);
+        Ok(())
+    }
+}
+
 #[wasm_bindgen]
-pub struct WasmInMemKyberPreKeyStore(InMemKyberPreKeyStore);
+pub struct WasmInMemKyberPreKeyStore(KyberUsageTrackingStore);
 
 #[wasm_bindgen]
 impl WasmInMemKyberPreKeyStore {
     #[wasm_bindgen(constructor)]
     pub fn new() -> WasmInMemKyberPreKeyStore {
-        WasmInMemKyberPreKeyStore(InMemKyberPreKeyStore::new())
+        WasmInMemKyberPreKeyStore(KyberUsageTrackingStore::new())
     }
 
     #[wasm_bindgen]
@@ -542,6 +753,25 @@ impl WasmInMemKyberPreKeyStore {
             Err(SignalProtocolError::InvalidKyberPreKeyId) => Ok(None),
             Err(e) => Err(signal_error_to_js(e)),
         }
+    }
+
+    /// Export the anti-replay memory — the set of `(kyberId, signedPreKeyId,
+    /// baseKey)` triples already seen — for durable storage. Persist it
+    /// alongside the kyber records and re-import at hydration; without it the
+    /// replay guard resets on every reload (L16). Format: version byte (1),
+    /// u32 BE record count, then per record `kyberId u32 BE || signedPreKeyId
+    /// u32 BE || 33-byte compressed base key`.
+    #[wasm_bindgen]
+    pub fn export_kyber_usage(&self) -> Vec<u8> {
+        self.0.export_usage()
+    }
+
+    /// Merge a previously exported usage set back in. Union semantics with
+    /// dedup, so re-importing the same export is a no-op. Unknown version,
+    /// malformed length, or an invalid base key is a hard error.
+    #[wasm_bindgen]
+    pub fn import_kyber_usage(&mut self, bytes: &[u8]) -> Result<(), JsValue> {
+        self.0.import_usage(bytes)
     }
 }
 
@@ -797,6 +1027,60 @@ impl WasmCiphertext {
     #[wasm_bindgen(getter)]
     pub fn body(&self) -> Vec<u8> {
         self.body.clone()
+    }
+}
+
+/// Result of `decryptMessage`: the plaintext plus the one-time pre-key ids the
+/// engine consumed while establishing a new session.
+///
+/// The engine learns these ids internally (`pre_key_used` in
+/// `rust/protocol/src/session_management.rs`) but upstream surfaces only the
+/// plaintext. Signal's own clients don't need them returned — their store
+/// callbacks are app code and delete/mark durably at call time. Our stores sit
+/// behind the wasm boundary, so the ids are reported here for the TS layer to
+/// tombstone in its durable store; without that, a consumed one-time kyber
+/// record is re-imported on next hydration and its KEM private key is reused
+/// across restarts (M27). All id fields are `undefined` for Whisper
+/// (non-prekey) decrypts and for prekey messages that decrypted against an
+/// existing session. Under concurrent decrypts sharing one store set a caller
+/// may see a superset of its own consumed ids — every reported id was
+/// genuinely consumed, so tombstoning it is always safe.
+#[wasm_bindgen]
+pub struct WasmDecryptResult {
+    plaintext: Vec<u8>,
+    kyber_pre_key_id: Option<u32>,
+    signed_pre_key_id: Option<u32>,
+    one_time_pre_key_id: Option<u32>,
+}
+
+#[wasm_bindgen]
+impl WasmDecryptResult {
+    #[wasm_bindgen(getter)]
+    pub fn plaintext(&self) -> Vec<u8> {
+        self.plaintext.clone()
+    }
+
+    /// The one-time kyber pre-key consumed by this decrypt, if any. Tombstone
+    /// it in the durable store (M27).
+    #[wasm_bindgen(getter, js_name = kyberPreKeyId)]
+    pub fn kyber_pre_key_id(&self) -> Option<u32> {
+        self.kyber_pre_key_id
+    }
+
+    /// The signed pre-key paired with the consumed kyber key in the
+    /// anti-replay record. Correlation only — signed pre-keys are not
+    /// consumed.
+    #[wasm_bindgen(getter, js_name = signedPreKeyId)]
+    pub fn signed_pre_key_id(&self) -> Option<u32> {
+        self.signed_pre_key_id
+    }
+
+    /// The one-time X25519 pre-key consumed (already removed from the engine
+    /// store by the decrypt itself), if any. Tombstone it in the durable
+    /// store.
+    #[wasm_bindgen(getter, js_name = oneTimePreKeyId)]
+    pub fn one_time_pre_key_id(&self) -> Option<u32> {
+        self.one_time_pre_key_id
     }
 }
 
@@ -1129,6 +1413,12 @@ pub async fn encrypt_message(
 }
 
 /// Decrypt a Signal message.
+///
+/// Returns the plaintext plus any one-time pre-key ids consumed while
+/// establishing a new session (see `WasmDecryptResult`). The ids are captured
+/// by the wrapper-owned stores' trait callbacks during the engine call —
+/// exactly where Signal's own clients persist them — so they reflect genuine
+/// consumption, never a guess from the message header.
 #[allow(clippy::too_many_arguments)]
 #[wasm_bindgen(js_name = decryptMessage)]
 pub async fn decrypt_message(
@@ -1141,7 +1431,7 @@ pub async fn decrypt_message(
     prekey_store: &mut WasmInMemPreKeyStore,
     signed_prekey_store: &WasmInMemSignedPreKeyStore,
     kyber_prekey_store: &mut WasmInMemKyberPreKeyStore,
-) -> Result<Vec<u8>, JsValue> {
+) -> Result<WasmDecryptResult, JsValue> {
     let mut rng = rand::rng();
 
     let msg_type = CiphertextMessageType::try_from(message_type).map_err(|_| {
@@ -1163,6 +1453,10 @@ pub async fn decrypt_message(
         }
     };
 
+    // Drop stale markers so only THIS decrypt's consumption is reported.
+    prekey_store.0.consumed.clear();
+    kyber_prekey_store.0.consumed.clear();
+
     let plaintext = message_decrypt(
         &ciphertext_msg,
         &sender.0,
@@ -1177,7 +1471,21 @@ pub async fn decrypt_message(
     .await
     .map_err(signal_error_to_js)?;
 
-    Ok(plaintext)
+    let consumed_kyber = std::mem::take(&mut kyber_prekey_store.0.consumed);
+    let consumed_ec = std::mem::take(&mut prekey_store.0.consumed);
+    // One prekey message establishes at most one session, so each Vec holds at
+    // most one entry single-threaded; `last` is defensive against interleaving.
+    let (kyber_pre_key_id, signed_pre_key_id) = match consumed_kyber.last() {
+        Some((kyber_id, signed_id)) => (Some(*kyber_id), Some(*signed_id)),
+        None => (None, None),
+    };
+
+    Ok(WasmDecryptResult {
+        plaintext,
+        kyber_pre_key_id,
+        signed_pre_key_id,
+        one_time_pre_key_id: consumed_ec.last().copied(),
+    })
 }
 
 /// Create a sender key distribution message.

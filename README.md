@@ -97,7 +97,7 @@ const ciphertext = await encryptMessage(
 );
 
 // 8. Decrypt a message
-const decrypted = await decryptMessage(
+const result = await decryptMessage(
   ciphertext.body,
   ciphertext.message_type,
   aliceAddress,
@@ -108,6 +108,16 @@ const decrypted = await decryptMessage(
   signedPrekeyStore,
   kyberPrekeyStore,
 );
+const plaintext2 = result.plaintext;
+
+// 9. Tombstone any one-time keys the decrypt consumed (M27). All id fields
+//    are `undefined` when nothing was consumed (e.g. non-prekey messages).
+if (result.kyberPreKeyId !== undefined) {
+  // delete kyber prekey result.kyberPreKeyId from your durable store
+}
+if (result.oneTimePreKeyId !== undefined) {
+  // delete X25519 prekey result.oneTimePreKeyId from your durable store
+}
 ```
 
 ## API Reference
@@ -136,7 +146,7 @@ All stores support import/export for IndexedDB persistence.
 | `InMemSessionStore` | `new()` | `export_session(address)`, `import_session(address, bytes)`, `has_session(address)`, `archive_session(address)` |
 | `InMemPreKeyStore` | `new()` | `export_pre_key(id)`, `import_pre_key(id, bytes)` |
 | `InMemSignedPreKeyStore` | `new()` | `export_signed_pre_key(id)`, `import_signed_pre_key(id, bytes)` |
-| `InMemKyberPreKeyStore` | `new()` | `export_kyber_pre_key(id)`, `import_kyber_pre_key(id, bytes)` |
+| `InMemKyberPreKeyStore` | `new()` | `export_kyber_pre_key(id)`, `import_kyber_pre_key(id, bytes)`, `export_kyber_usage()`, `import_kyber_usage(bytes)` |
 | `InMemSenderKeyStore` | `new()` | `export_sender_key(address, distributionId)`, `import_sender_key(address, distributionId, bytes)`, `remove_sender_key(address, distributionId)` |
 
 > **Since 0.4.0:** every `distributionId` must be a caller-minted **UUID string**
@@ -145,6 +155,15 @@ All stores support import/export for IndexedDB persistence.
 > the sender-key record (returns `boolean`) and must be called before
 > re-creating a distribution on member removal/compromise, otherwise libsignal
 > reuses the existing chain and removed members keep decrypting.
+
+> **Since 0.6.0:** `InMemKyberPreKeyStore` also carries the kyber **anti-replay
+> memory** — the set of `(kyberId, signedPreKeyId, senderBaseKey)` triples the
+> engine has already seen. Persist it (`export_kyber_usage()` → bytes,
+> `import_kyber_usage(bytes)` at hydration) alongside the kyber records.
+> Without it the replay guard resets on every reload and a replayed
+> PreKeySignalMessage against a live last-resort key decapsulates again (L16).
+> This matches what Signal's own clients persist (Signal-iOS's
+> `KyberPreKeyUseRecord` table, Signal-Desktop's `kyberPreKey_triples`).
 
 ### Key Generation
 
@@ -161,7 +180,7 @@ All stores support import/export for IndexedDB persistence.
 |----------|---------|-------------|
 | `processPreKeyBundle(...)` | `Promise<void>` | Establish a session from a PreKey bundle |
 | `encryptMessage(plaintext, recipient, localAddress, sessionStore, identityStore)` | `Promise<WasmCiphertext>` | Encrypt a 1:1 message |
-| `decryptMessage(ciphertext, type, sender, localAddress, sessionStore, identityStore, prekeyStore, signedPrekeyStore, kyberPrekeyStore)` | `Promise<Uint8Array>` | Decrypt a 1:1 message |
+| `decryptMessage(ciphertext, type, sender, localAddress, sessionStore, identityStore, prekeyStore, signedPrekeyStore, kyberPrekeyStore)` | `Promise<WasmDecryptResult>` | Decrypt a 1:1 message. Result getters: `plaintext` (`Uint8Array`), plus `kyberPreKeyId` / `oneTimePreKeyId` / `signedPreKeyId` — the one-time pre-key ids consumed establishing a new session (`undefined` when none). Tombstone consumed ids in your durable store (M27) |
 | `createSenderKeyDistribution(localAddress, distributionId, senderKeyStore)` | `Promise<Uint8Array>` | Create a sender key distribution message (`distributionId` must be a UUID string) |
 | `processSenderKeyDistribution(senderAddress, distMessage, senderKeyStore)` | `Promise<void>` | Process a sender key distribution message (id read from the message) |
 | `encryptGroupMessage(localAddress, distributionId, plaintext, senderKeyStore)` | `Promise<Uint8Array>` | Encrypt a group message (`distributionId` must be a UUID string) |
@@ -180,6 +199,7 @@ Every rejected promise throws a real JS `Error` with:
 |--------|---------|
 | `NoSenderKeyState` | No sender-key record for the message's distribution id (e.g. SKDM not processed yet — retry after pull) |
 | `DuplicatedMessage` | Message counter already seen (replay/duplicate; usually benign) |
+| `ReusedKyberBaseKey` | Kyber anti-replay rejection: this sender base key was already used with this `(kyberId, signedPreKeyId)` pair — a replayed PreKeySignalMessage |
 | `UntrustedIdentity` | Sender identity key not trusted for the address |
 | `InvalidKyberPreKeyId` | Referenced Kyber pre-key id is invalid/missing |
 | `InvalidPreKeyId` | Referenced pre-key id is invalid/missing |
