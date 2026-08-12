@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Exact-pinned all crates.io dependency requirements** (`=x.y.z` on
+  wasm-bindgen, js-sys, web-sys, serde, serde-wasm-bindgen, serde_json,
+  getrandom (both diamond halves), uuid, zeroize, rand, subtle, async-trait,
+  console_error_panic_hook, wasm-bindgen-test). Previously range-pinned
+  (`"0.2"`, `"1.0"` …) while the npm and CocoaPods consumers are
+  exact-pinned; a fresh resolve without `Cargo.lock` could silently pull
+  untested versions of crypto-adjacent crates. Pinned to the versions the
+  committed lockfile already resolves to — `cargo check --locked` verifies
+  byte-identical resolution, so no rebuild or republish is required. The
+  libsignal git rev and curve25519-dalek git tag were already exact.
+
 ## [0.6.0] - 2026-08-12
 
 PQXDH hardening: consumed one-time pre-key surfacing (M27) and durable kyber
