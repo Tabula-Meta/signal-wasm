@@ -47,13 +47,21 @@ fn js_error_message(err: &JsValue) -> String {
 async fn test_identity_key_generation() {
     init();
     let private_key = WasmPrivateKey::generate();
-    let public_key = private_key.get_public_key().expect("Failed to derive public key");
+    let public_key = private_key
+        .get_public_key()
+        .expect("Failed to derive public key");
 
     assert!(!public_key.serialize().is_empty());
 
     let identity_key_pair = WasmIdentityKeyPair::new(&public_key, &private_key);
-    assert_eq!(identity_key_pair.public_key().serialize(), public_key.serialize());
-    assert_eq!(identity_key_pair.private_key().serialize(), private_key.serialize());
+    assert_eq!(
+        identity_key_pair.public_key().serialize(),
+        public_key.serialize()
+    );
+    assert_eq!(
+        identity_key_pair.private_key().serialize(),
+        private_key.serialize()
+    );
 
     // Round-trip serialization
     let serialized = identity_key_pair.serialize();
@@ -74,7 +82,9 @@ async fn test_pre_key_generation() {
     let (_identity_key_pair, _registration_id) = create_test_identity();
     let mut prekey_store = WasmInMemPreKeyStore::new();
 
-    let pre_keys = generate_pre_keys(1, 5, &mut prekey_store).await.expect("Failed to generate prekeys");
+    let pre_keys = generate_pre_keys(1, 5, &mut prekey_store)
+        .await
+        .expect("Failed to generate prekeys");
     assert_eq!(pre_keys.len(), 5);
 
     let first = &pre_keys[0];
@@ -142,12 +152,19 @@ async fn test_session_establishment_and_messaging() {
     let bob_address = WasmProtocolAddress::new(bob_uuid.to_string(), 1).unwrap();
 
     // --- Bob Generates Keys ---
-    let bob_pre_keys = generate_pre_keys(1, 1, &mut bob_prekey_store).await.unwrap();
-    let bob_spk = generate_signed_pre_key(1, &bob_identity, &mut bob_signed_prekey_store).await.unwrap();
-    let bob_kpk = generate_kyber_pre_key(1, &bob_identity, &mut bob_kyber_prekey_store).await.unwrap();
+    let bob_pre_keys = generate_pre_keys(1, 1, &mut bob_prekey_store)
+        .await
+        .unwrap();
+    let bob_spk = generate_signed_pre_key(1, &bob_identity, &mut bob_signed_prekey_store)
+        .await
+        .unwrap();
+    let bob_kpk = generate_kyber_pre_key(1, &bob_identity, &mut bob_kyber_prekey_store)
+        .await
+        .unwrap();
 
     let pk = &bob_pre_keys[0];
-    let bob_identity_pk = WasmPublicKey::deserialize(&bob_identity.public_key().serialize()).unwrap();
+    let bob_identity_pk =
+        WasmPublicKey::deserialize(&bob_identity.public_key().serialize()).unwrap();
 
     // --- Alice Establishes Session ---
     process_pre_key_bundle(
@@ -262,13 +279,9 @@ async fn test_group_messaging() {
     .expect("Failed to create sender key distribution");
 
     // 2. Bob Processes Distribution
-    process_sender_key_distribution(
-        &alice_address,
-        &dist_msg,
-        &mut bob_sender_key_store,
-    )
-    .await
-    .expect("Bob failed to process distribution");
+    process_sender_key_distribution(&alice_address, &dist_msg, &mut bob_sender_key_store)
+        .await
+        .expect("Bob failed to process distribution");
 
     // 3. Alice Encrypts to Group
     let plaintext = b"Group Hello";
@@ -282,13 +295,9 @@ async fn test_group_messaging() {
     .expect("Group encryption failed");
 
     // 4. Bob Decrypts
-    let decrypted = decrypt_group_message(
-        &alice_address,
-        &group_cipher,
-        &mut bob_sender_key_store,
-    )
-    .await
-    .expect("Group decryption failed");
+    let decrypted = decrypt_group_message(&alice_address, &group_cipher, &mut bob_sender_key_store)
+        .await
+        .expect("Group decryption failed");
 
     assert_eq!(decrypted, plaintext);
 }
@@ -335,13 +344,10 @@ async fn test_group_roundtrip_caller_minted_distribution_id() {
     .await
     .expect("Group encryption failed");
 
-    let decrypted = decrypt_group_message(
-        &alice_address,
-        &ciphertext,
-        &mut restored_sender_key_store,
-    )
-    .await
-    .expect("Group decryption on restored store failed");
+    let decrypted =
+        decrypt_group_message(&alice_address, &ciphertext, &mut restored_sender_key_store)
+            .await
+            .expect("Group decryption on restored store failed");
 
     assert_eq!(decrypted, plaintext);
 }
@@ -364,13 +370,9 @@ async fn test_group_decrypt_wrong_distribution_id_fails() {
     )
     .await
     .expect("Failed to create sender key distribution");
-    process_sender_key_distribution(
-        &alice_address,
-        &dist_msg,
-        &mut bob_sender_key_store,
-    )
-    .await
-    .expect("Bob failed to process distribution");
+    process_sender_key_distribution(&alice_address, &dist_msg, &mut bob_sender_key_store)
+        .await
+        .expect("Bob failed to process distribution");
 
     // Alice encrypts under a different distribution id; the ciphertext
     // therefore embeds an id Bob has no record for.
@@ -390,13 +392,9 @@ async fn test_group_decrypt_wrong_distribution_id_fails() {
     .await
     .expect("Group encryption failed");
 
-    let err = decrypt_group_message(
-        &alice_address,
-        &ciphertext,
-        &mut bob_sender_key_store,
-    )
-    .await
-    .expect_err("Decryption with the wrong distribution id must fail");
+    let err = decrypt_group_message(&alice_address, &ciphertext, &mut bob_sender_key_store)
+        .await
+        .expect_err("Decryption with the wrong distribution id must fail");
 
     assert_eq!(js_error_code(&err), "NoSenderKeyState");
     assert!(js_error_message(&err).starts_with("SignalError:"));
@@ -440,7 +438,10 @@ async fn test_remove_sender_key_rotates_key_material() {
         .remove_sender_key(&alice_address, distribution_id.clone())
         .await
         .expect("Second remove failed");
-    assert!(!removed_again, "second remove_sender_key should report no record");
+    assert!(
+        !removed_again,
+        "second remove_sender_key should report no record"
+    );
 
     // 3. Re-create under the same distribution id: fresh key material.
     let new_dist_msg = create_sender_key_distribution(
@@ -463,13 +464,9 @@ async fn test_remove_sender_key_rotates_key_material() {
 
     // 4. The rotated distribution is fully functional.
     let mut bob_sender_key_store = WasmInMemSenderKeyStore::new();
-    process_sender_key_distribution(
-        &alice_address,
-        &new_dist_msg,
-        &mut bob_sender_key_store,
-    )
-    .await
-    .expect("Bob failed to process rotated distribution");
+    process_sender_key_distribution(&alice_address, &new_dist_msg, &mut bob_sender_key_store)
+        .await
+        .expect("Bob failed to process rotated distribution");
 
     let plaintext = b"Post-rotation message";
     let ciphertext = encrypt_group_message(
@@ -480,13 +477,9 @@ async fn test_remove_sender_key_rotates_key_material() {
     )
     .await
     .expect("Post-rotation encryption failed");
-    let decrypted = decrypt_group_message(
-        &alice_address,
-        &ciphertext,
-        &mut bob_sender_key_store,
-    )
-    .await
-    .expect("Post-rotation decryption failed");
+    let decrypted = decrypt_group_message(&alice_address, &ciphertext, &mut bob_sender_key_store)
+        .await
+        .expect("Post-rotation decryption failed");
     assert_eq!(decrypted, plaintext);
 }
 
@@ -515,13 +508,9 @@ async fn test_group_decrypt_unknown_distribution_error_code() {
 
     // Bob never processed any SKDM, so the record lookup misses.
     let mut fresh_sender_key_store = WasmInMemSenderKeyStore::new();
-    let err = decrypt_group_message(
-        &alice_address,
-        &ciphertext,
-        &mut fresh_sender_key_store,
-    )
-    .await
-    .expect_err("Decryption with an unknown distribution id must fail");
+    let err = decrypt_group_message(&alice_address, &ciphertext, &mut fresh_sender_key_store)
+        .await
+        .expect_err("Decryption with an unknown distribution id must fail");
 
     assert_eq!(js_error_code(&err), "NoSenderKeyState");
     assert!(js_error_message(&err).starts_with("SignalError:"));
@@ -592,12 +581,19 @@ async fn test_persistence() {
     let bob_address = WasmProtocolAddress::new(bob_uuid.to_string(), 1).unwrap();
 
     // Bob generates keys
-    let bob_pre_keys = generate_pre_keys(1, 1, &mut bob_prekey_store).await.unwrap();
-    let bob_spk = generate_signed_pre_key(1, &bob_identity, &mut bob_signed_prekey_store).await.unwrap();
-    let bob_kpk = generate_kyber_pre_key(1, &bob_identity, &mut bob_kyber_prekey_store).await.unwrap();
+    let bob_pre_keys = generate_pre_keys(1, 1, &mut bob_prekey_store)
+        .await
+        .unwrap();
+    let bob_spk = generate_signed_pre_key(1, &bob_identity, &mut bob_signed_prekey_store)
+        .await
+        .unwrap();
+    let bob_kpk = generate_kyber_pre_key(1, &bob_identity, &mut bob_kyber_prekey_store)
+        .await
+        .unwrap();
 
     let pk = &bob_pre_keys[0];
-    let bob_identity_pk = WasmPublicKey::deserialize(&bob_identity.public_key().serialize()).unwrap();
+    let bob_identity_pk =
+        WasmPublicKey::deserialize(&bob_identity.public_key().serialize()).unwrap();
 
     // Alice establishes session
     process_pre_key_bundle(
@@ -798,7 +794,11 @@ async fn test_scannable_fingerprint_cross_perspective() {
     // encoding starts with 0x08 0x02; rewriting the version byte to 1 gives a
     // well-formed payload with a mismatched version.
     let mut wrong_version = sn_bob.scannable();
-    assert_eq!(&wrong_version[..2], &[0x08, 0x02], "expected v2 varint header");
+    assert_eq!(
+        &wrong_version[..2],
+        &[0x08, 0x02],
+        "expected v2 varint header"
+    );
     wrong_version[1] = 0x01;
     let err = verify_scannable_fingerprint(
         &wrong_version,
@@ -841,8 +841,8 @@ async fn test_identity_proof_of_possession() {
     let message = b"re-key authorisation challenge 0123456789";
 
     // Round-trip.
-    let signature = sign_with_identity_key(&identity.private_key(), message)
-        .expect("signing failed");
+    let signature =
+        sign_with_identity_key(&identity.private_key(), message).expect("signing failed");
     assert_eq!(signature.len(), 64, "XEdDSA signature is 64 bytes");
     assert!(verify_identity_signature(
         &identity.public_key(),
@@ -921,17 +921,24 @@ async fn establish_prekey_session(with_one_time_ec: bool) -> PreKeyFixture {
     let mut bob_kyber_prekey_store = WasmInMemKyberPreKeyStore::new();
     let bob_address = WasmProtocolAddress::new(bob_uuid.to_string(), 1).unwrap();
 
-    let bob_spk = generate_signed_pre_key(1, &bob_identity, &mut bob_signed_prekey_store).await.unwrap();
-    let bob_kpk = generate_kyber_pre_key(1, &bob_identity, &mut bob_kyber_prekey_store).await.unwrap();
+    let bob_spk = generate_signed_pre_key(1, &bob_identity, &mut bob_signed_prekey_store)
+        .await
+        .unwrap();
+    let bob_kpk = generate_kyber_pre_key(1, &bob_identity, &mut bob_kyber_prekey_store)
+        .await
+        .unwrap();
 
     let (prekey_id, prekey) = if with_one_time_ec {
-        let keys = generate_pre_keys(1, 1, &mut bob_prekey_store).await.unwrap();
+        let keys = generate_pre_keys(1, 1, &mut bob_prekey_store)
+            .await
+            .unwrap();
         (Some(keys[0].id()), Some(keys[0].public_key()))
     } else {
         (None, None)
     };
 
-    let bob_identity_pk = WasmPublicKey::deserialize(&bob_identity.public_key().serialize()).unwrap();
+    let bob_identity_pk =
+        WasmPublicKey::deserialize(&bob_identity.public_key().serialize()).unwrap();
 
     let mut fixture = PreKeyFixture {
         alice_address,
@@ -985,7 +992,10 @@ async fn alice_first_message(f: &mut PreKeyFixture, body: &[u8]) -> WasmCipherte
 }
 
 /// Bob decrypts Alice's message using his fixture stores.
-async fn bob_decrypts(f: &mut PreKeyFixture, ct: &WasmCiphertext) -> Result<WasmDecryptResult, JsValue> {
+async fn bob_decrypts(
+    f: &mut PreKeyFixture,
+    ct: &WasmCiphertext,
+) -> Result<WasmDecryptResult, JsValue> {
     decrypt_message(
         &ct.body(),
         ct.message_type(),
@@ -1017,8 +1027,18 @@ async fn test_decrypt_reports_consumed_prekey_ids() {
     // The engine removed the one-time EC key itself; the kyber record remains
     // (one-time vs last-resort deletion is the TS layer's job, per the
     // KyberPreKeyStore trait contract).
-    assert!(f.bob_prekey_store.export_pre_key(1).await.unwrap().is_none());
-    assert!(f.bob_kyber_prekey_store.export_kyber_pre_key(1).await.unwrap().is_some());
+    assert!(f
+        .bob_prekey_store
+        .export_pre_key(1)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(f
+        .bob_kyber_prekey_store
+        .export_kyber_pre_key(1)
+        .await
+        .unwrap()
+        .is_some());
 }
 
 #[wasm_bindgen_test]
@@ -1026,7 +1046,9 @@ async fn test_replayed_prekey_message_same_process_is_duplicated() {
     let mut f = establish_prekey_session(true).await;
     let ct = alice_first_message(&mut f, b"replay me").await;
 
-    bob_decrypts(&mut f, &ct).await.expect("First decryption failed");
+    bob_decrypts(&mut f, &ct)
+        .await
+        .expect("First decryption failed");
 
     // Same-process replay: the session established from this base key is still
     // current, so the engine short-circuits before the kyber mark and the
@@ -1052,7 +1074,9 @@ async fn test_kyber_usage_export_import_roundtrip() {
     // Import into a fresh store; union semantics make re-import a no-op.
     let mut restored = WasmInMemKyberPreKeyStore::new();
     restored.import_kyber_usage(&usage).expect("Import failed");
-    restored.import_kyber_usage(&usage).expect("Re-import must be idempotent");
+    restored
+        .import_kyber_usage(&usage)
+        .expect("Re-import must be idempotent");
     assert_eq!(restored.export_kyber_usage().len(), 46);
 
     // Malformed exports are hard errors, never silent drops.
@@ -1074,7 +1098,9 @@ async fn test_kyber_replay_rejected_across_restart() {
     let mut f = establish_prekey_session(false).await;
     let ct = alice_first_message(&mut f, b"last resort").await;
 
-    let first = bob_decrypts(&mut f, &ct).await.expect("First decryption failed");
+    let first = bob_decrypts(&mut f, &ct)
+        .await
+        .expect("First decryption failed");
     assert_eq!(first.plaintext(), b"last resort");
     assert_eq!(first.kyber_pre_key_id(), Some(1));
     assert_eq!(first.one_time_pre_key_id(), None); // no one-time EC key in play
@@ -1099,9 +1125,15 @@ async fn test_kyber_replay_rejected_across_restart() {
     // again. This is the pre-0.6.0 hole; if this ever fails, the fix test
     // below proves nothing.
     let mut vulnerable_kyber = WasmInMemKyberPreKeyStore::new();
-    vulnerable_kyber.import_kyber_pre_key(1, &kyber_record).await.unwrap();
+    vulnerable_kyber
+        .import_kyber_pre_key(1, &kyber_record)
+        .await
+        .unwrap();
     let mut control_signed = WasmInMemSignedPreKeyStore::new();
-    control_signed.import_signed_pre_key(1, &signed_record).await.unwrap();
+    control_signed
+        .import_signed_pre_key(1, &signed_record)
+        .await
+        .unwrap();
     let replay = decrypt_message(
         &ct.body(),
         ct.message_type(),
@@ -1114,14 +1146,25 @@ async fn test_kyber_replay_rejected_across_restart() {
         &mut vulnerable_kyber,
     )
     .await;
-    assert!(replay.is_ok(), "control replay should succeed without usage import");
+    assert!(
+        replay.is_ok(),
+        "control replay should succeed without usage import"
+    );
 
     // The fix — "restart" WITH the usage import: the replay is rejected.
     let mut patched_kyber = WasmInMemKyberPreKeyStore::new();
-    patched_kyber.import_kyber_pre_key(1, &kyber_record).await.unwrap();
-    patched_kyber.import_kyber_usage(&usage).expect("Usage import failed");
+    patched_kyber
+        .import_kyber_pre_key(1, &kyber_record)
+        .await
+        .unwrap();
+    patched_kyber
+        .import_kyber_usage(&usage)
+        .expect("Usage import failed");
     let mut patched_signed = WasmInMemSignedPreKeyStore::new();
-    patched_signed.import_signed_pre_key(1, &signed_record).await.unwrap();
+    patched_signed
+        .import_signed_pre_key(1, &signed_record)
+        .await
+        .unwrap();
 
     let err = decrypt_message(
         &ct.body(),
@@ -1138,4 +1181,783 @@ async fn test_kyber_replay_rejected_across_restart() {
     .err()
     .expect("Replay with persisted usage must be rejected");
     assert_eq!(js_error_code(&err), "ReusedKyberBaseKey");
+}
+
+// ============================================================================
+// Canonical parity coverage (L25 a-d): ported from libsignal @ b5121d0.
+//
+// Mappings to canonical tests are documented on each test. Where the wasm API
+// cannot expose an internal value (e.g. alice_base_key), the assertion is
+// translated to an observable public-API equivalent and the canonical source is
+// still cited.
+// ============================================================================
+
+/// Bob encrypts a reply to Alice on his fixture session.
+async fn bob_encrypts(f: &mut PreKeyFixture, body: &[u8]) -> WasmCiphertext {
+    let ct = encrypt_message(
+        body,
+        &f.alice_address,
+        &f.bob_address,
+        &mut f.bob_session_store,
+        &mut f.bob_identity_store,
+    )
+    .await
+    .expect("Bob reply encryption failed");
+    ct
+}
+
+/// Alice decrypts a message from Bob on her fixture session.
+async fn alice_decrypts(
+    f: &mut PreKeyFixture,
+    ct: &WasmCiphertext,
+) -> Result<WasmDecryptResult, JsValue> {
+    decrypt_message(
+        &ct.body(),
+        ct.message_type(),
+        &f.bob_address,
+        &f.alice_address,
+        &mut f.alice_session_store,
+        &mut f.alice_identity_store,
+        &mut WasmInMemPreKeyStore::new(),
+        &WasmInMemSignedPreKeyStore::new(),
+        &mut WasmInMemKyberPreKeyStore::new(),
+    )
+    .await
+}
+
+// ----------------------------------------------------------------------------
+// (a) 1:1 session parity
+// ----------------------------------------------------------------------------
+
+/// Mirrors `run_session_interaction` (rust/protocol/tests/session.rs:2610),
+/// driven by `test_basic_session` (session.rs:791).
+///
+/// Out-of-order message delivery still decrypts correctly after an initial
+/// bidirectional exchange.
+#[wasm_bindgen_test]
+async fn test_session_out_of_order_delivery() {
+    let mut f = establish_prekey_session(false).await;
+
+    // Initial bidirectional exchange to give both sides a sender chain.
+    let first = alice_first_message(&mut f, b"first").await;
+    bob_decrypts(&mut f, &first)
+        .await
+        .expect("Bob failed to decrypt first");
+
+    let reply = bob_encrypts(&mut f, b"reply").await;
+    assert_eq!(reply.message_type(), 2); // Whisper
+    alice_decrypts(&mut f, &reply)
+        .await
+        .expect("Alice failed to decrypt reply");
+
+    const ALICE_MESSAGE_COUNT: usize = 50;
+    const BOB_MESSAGE_COUNT: usize = 50;
+
+    let mut alice_ciphertexts = Vec::with_capacity(ALICE_MESSAGE_COUNT);
+    for i in 0..ALICE_MESSAGE_COUNT {
+        let body = format!("Alice out-of-order {i}");
+        let ct = encrypt_message(
+            body.as_bytes(),
+            &f.bob_address,
+            &f.alice_address,
+            &mut f.alice_session_store,
+            &mut f.alice_identity_store,
+        )
+        .await
+        .expect("Alice encrypt failed");
+        alice_ciphertexts.push((body, ct));
+    }
+
+    // Decrypt in reverse order (deterministic out-of-order delivery).
+    for i in (0..ALICE_MESSAGE_COUNT).rev() {
+        let decrypted = bob_decrypts(&mut f, &alice_ciphertexts[i].1)
+            .await
+            .expect("Bob failed to decrypt out-of-order Alice message");
+        assert_eq!(decrypted.plaintext(), alice_ciphertexts[i].0.as_bytes());
+    }
+
+    let mut bob_ciphertexts = Vec::with_capacity(BOB_MESSAGE_COUNT);
+    for i in 0..BOB_MESSAGE_COUNT {
+        let body = format!("Bob out-of-order {i}");
+        let ct = encrypt_message(
+            body.as_bytes(),
+            &f.alice_address,
+            &f.bob_address,
+            &mut f.bob_session_store,
+            &mut f.bob_identity_store,
+        )
+        .await
+        .expect("Bob encrypt failed");
+        bob_ciphertexts.push((body, ct));
+    }
+
+    for i in (0..BOB_MESSAGE_COUNT).rev() {
+        let decrypted = alice_decrypts(&mut f, &bob_ciphertexts[i].1)
+            .await
+            .expect("Alice failed to decrypt out-of-order Bob message");
+        assert_eq!(decrypted.plaintext(), bob_ciphertexts[i].0.as_bytes());
+    }
+}
+
+/// Mirrors `test_message_key_limits` (rust/protocol/tests/session.rs:798).
+///
+/// A 2000-key skip works: messages up to `MAX_MESSAGE_KEYS` ahead of the last
+/// decrypted message can still be decrypted. An older message that falls out of
+/// the skipped-key window is rejected as a duplicate.
+#[wasm_bindgen_test]
+async fn test_session_skipped_key_window() {
+    let mut f = establish_prekey_session(false).await;
+
+    const MAX_MESSAGE_KEYS: usize = 2000;
+    const TOO_MANY_MESSAGES: usize = MAX_MESSAGE_KEYS + 300;
+
+    let mut inflight = Vec::with_capacity(TOO_MANY_MESSAGES);
+    for i in 0..TOO_MANY_MESSAGES {
+        let body = format!("It's over {i}");
+        let ct = encrypt_message(
+            body.as_bytes(),
+            &f.bob_address,
+            &f.alice_address,
+            &mut f.alice_session_store,
+            &mut f.alice_identity_store,
+        )
+        .await
+        .expect("Alice encrypt failed");
+        inflight.push(ct);
+    }
+
+    let decrypted_1000 = bob_decrypts(&mut f, &inflight[1000])
+        .await
+        .expect("Message at index 1000 should decrypt");
+    assert_eq!(
+        decrypted_1000.plaintext(),
+        format!("It's over 1000").as_bytes()
+    );
+
+    let decrypted_last = bob_decrypts(&mut f, &inflight[TOO_MANY_MESSAGES - 1])
+        .await
+        .expect("Last message should decrypt");
+    assert_eq!(
+        decrypted_last.plaintext(),
+        format!("It's over {}", TOO_MANY_MESSAGES - 1).as_bytes()
+    );
+
+    let err = match bob_decrypts(&mut f, &inflight[5]).await {
+        Ok(_) => panic!("Message older than the skipped-key window must fail"),
+        Err(e) => e,
+    };
+    assert_eq!(js_error_code(&err), "DuplicatedMessage");
+}
+
+/// Mirrors `test_chain_jump_over_limit` (rust/protocol/tests/session.rs:248).
+///
+/// The receiver rejects a message whose chain counter is more than
+/// `MAX_FORWARD_JUMPS` (25_000) ahead of the last received counter.
+#[wasm_bindgen_test]
+async fn test_session_chain_jump_over_limit() {
+    let mut f = establish_prekey_session(false).await;
+
+    const MAX_FORWARD_JUMPS: usize = 25_000;
+
+    for _ in 0..(MAX_FORWARD_JUMPS + 1) {
+        let _ct = encrypt_message(
+            b"Yet another message for you",
+            &f.bob_address,
+            &f.alice_address,
+            &mut f.alice_session_store,
+            &mut f.alice_identity_store,
+        )
+        .await
+        .expect("Alice encrypt failed");
+    }
+
+    let too_far = encrypt_message(
+        b"Now you have gone too far",
+        &f.bob_address,
+        &f.alice_address,
+        &mut f.alice_session_store,
+        &mut f.alice_identity_store,
+    )
+    .await
+    .expect("Alice encrypt failed");
+
+    match bob_decrypts(&mut f, &too_far).await {
+        Ok(_) => panic!("A >25k chain jump must be rejected"),
+        Err(_) => {}
+    }
+}
+
+// ----------------------------------------------------------------------------
+// (b) Group sender-key parity
+// ----------------------------------------------------------------------------
+
+/// Mirrors `group_basic_ratchet` (rust/protocol/tests/groups.rs:917).
+///
+/// Replay is rejected; out-of-order messages inside the skipped-key window are
+/// accepted.
+#[wasm_bindgen_test]
+async fn test_group_replay_and_out_of_order_within_window() {
+    let alice_uuid = "00000000-0000-0000-0000-00000000000A";
+    let distribution_id = mint_distribution_id();
+
+    let (_alice_identity, _alice_reg_id) = create_test_identity();
+    let mut alice_sender_key_store = WasmInMemSenderKeyStore::new();
+    let alice_address = WasmProtocolAddress::new(alice_uuid.to_string(), 1).unwrap();
+
+    let mut bob_sender_key_store = WasmInMemSenderKeyStore::new();
+
+    let dist_msg = create_sender_key_distribution(
+        &alice_address,
+        distribution_id.clone(),
+        &mut alice_sender_key_store,
+    )
+    .await
+    .expect("Failed to create sender key distribution");
+
+    process_sender_key_distribution(&alice_address, &dist_msg, &mut bob_sender_key_store)
+        .await
+        .expect("Bob failed to process distribution");
+
+    let ct1 = encrypt_group_message(
+        &alice_address,
+        distribution_id.clone(),
+        b"swim camp",
+        &mut alice_sender_key_store,
+    )
+    .await
+    .expect("Group encrypt 1 failed");
+    let ct2 = encrypt_group_message(
+        &alice_address,
+        distribution_id.clone(),
+        b"robot camp",
+        &mut alice_sender_key_store,
+    )
+    .await
+    .expect("Group encrypt 2 failed");
+    let ct3 = encrypt_group_message(
+        &alice_address,
+        distribution_id.clone(),
+        b"ninja camp",
+        &mut alice_sender_key_store,
+    )
+    .await
+    .expect("Group encrypt 3 failed");
+
+    let pt1 = decrypt_group_message(&alice_address, &ct1, &mut bob_sender_key_store)
+        .await
+        .expect("Group decrypt 1 failed");
+    assert_eq!(pt1, b"swim camp");
+
+    let err = decrypt_group_message(&alice_address, &ct1, &mut bob_sender_key_store)
+        .await
+        .expect_err("Replay of message 1 must be rejected");
+    assert_eq!(js_error_code(&err), "DuplicatedMessage");
+
+    let pt3 = decrypt_group_message(&alice_address, &ct3, &mut bob_sender_key_store)
+        .await
+        .expect("Group decrypt 3 failed");
+    assert_eq!(pt3, b"ninja camp");
+
+    let pt2 = decrypt_group_message(&alice_address, &ct2, &mut bob_sender_key_store)
+        .await
+        .expect("Out-of-order group decrypt 2 failed");
+    assert_eq!(pt2, b"robot camp");
+}
+
+/// Mirrors `group_out_of_order` (rust/protocol/tests/groups.rs:1089).
+///
+/// A full batch of 100 sender-key messages delivered out of order decrypts
+/// correctly.
+#[wasm_bindgen_test]
+async fn test_group_out_of_order_batch() {
+    let alice_uuid = "00000000-0000-0000-0000-00000000000A";
+    let distribution_id = mint_distribution_id();
+
+    let (_alice_identity, _alice_reg_id) = create_test_identity();
+    let mut alice_sender_key_store = WasmInMemSenderKeyStore::new();
+    let alice_address = WasmProtocolAddress::new(alice_uuid.to_string(), 1).unwrap();
+
+    let mut bob_sender_key_store = WasmInMemSenderKeyStore::new();
+
+    let dist_msg = create_sender_key_distribution(
+        &alice_address,
+        distribution_id.clone(),
+        &mut alice_sender_key_store,
+    )
+    .await
+    .expect("Failed to create sender key distribution");
+
+    process_sender_key_distribution(&alice_address, &dist_msg, &mut bob_sender_key_store)
+        .await
+        .expect("Bob failed to process distribution");
+
+    const COUNT: usize = 100;
+    let mut ciphertexts = Vec::with_capacity(COUNT);
+    let mut expected = Vec::with_capacity(COUNT);
+    for i in 0..COUNT {
+        let body = format!("nefarious plotting {i:02}/100");
+        let ct = encrypt_group_message(
+            &alice_address,
+            distribution_id.clone(),
+            body.as_bytes(),
+            &mut alice_sender_key_store,
+        )
+        .await
+        .expect("Group encrypt failed");
+        ciphertexts.push(ct);
+        expected.push(body);
+    }
+
+    // Deterministic out-of-order delivery: decrypt in reverse order.
+    for i in (0..COUNT).rev() {
+        let pt = decrypt_group_message(&alice_address, &ciphertexts[i], &mut bob_sender_key_store)
+            .await
+            .expect("Group decrypt failed");
+        assert_eq!(pt, expected[i].as_bytes());
+    }
+}
+
+/// Mirrors `group_too_far_in_the_future` (rust/protocol/tests/groups.rs:1160).
+///
+/// A sender-key message whose iteration is >25_000 ahead of the receiver's
+/// current chain position is rejected.
+#[wasm_bindgen_test]
+async fn test_group_too_far_in_the_future() {
+    let alice_uuid = "00000000-0000-0000-0000-00000000000A";
+    let distribution_id = mint_distribution_id();
+
+    let (_alice_identity, _alice_reg_id) = create_test_identity();
+    let mut alice_sender_key_store = WasmInMemSenderKeyStore::new();
+    let alice_address = WasmProtocolAddress::new(alice_uuid.to_string(), 1).unwrap();
+
+    let mut bob_sender_key_store = WasmInMemSenderKeyStore::new();
+
+    let dist_msg = create_sender_key_distribution(
+        &alice_address,
+        distribution_id.clone(),
+        &mut alice_sender_key_store,
+    )
+    .await
+    .expect("Failed to create sender key distribution");
+
+    process_sender_key_distribution(&alice_address, &dist_msg, &mut bob_sender_key_store)
+        .await
+        .expect("Bob failed to process distribution");
+
+    for i in 0..25001 {
+        encrypt_group_message(
+            &alice_address,
+            distribution_id.clone(),
+            format!("nefarious plotting {i}").as_bytes(),
+            &mut alice_sender_key_store,
+        )
+        .await
+        .expect("Group encrypt failed");
+    }
+
+    let too_far = encrypt_group_message(
+        &alice_address,
+        distribution_id.clone(),
+        b"you got the plan?",
+        &mut alice_sender_key_store,
+    )
+    .await
+    .expect("Group encrypt failed");
+
+    decrypt_group_message(&alice_address, &too_far, &mut bob_sender_key_store)
+        .await
+        .expect_err("A >25k sender-key jump must be rejected");
+}
+
+/// Mirrors `group_message_key_limit` (rust/protocol/tests/groups.rs:1226).
+///
+/// The sender-key skipped-message window is 2000 keys; messages inside the
+/// window decrypt, messages that fall out are rejected.
+#[wasm_bindgen_test]
+async fn test_group_message_key_limit() {
+    let alice_uuid = "00000000-0000-0000-0000-00000000000A";
+    let distribution_id = mint_distribution_id();
+
+    let (_alice_identity, _alice_reg_id) = create_test_identity();
+    let mut alice_sender_key_store = WasmInMemSenderKeyStore::new();
+    let alice_address = WasmProtocolAddress::new(alice_uuid.to_string(), 1).unwrap();
+
+    let mut bob_sender_key_store = WasmInMemSenderKeyStore::new();
+
+    let dist_msg = create_sender_key_distribution(
+        &alice_address,
+        distribution_id.clone(),
+        &mut alice_sender_key_store,
+    )
+    .await
+    .expect("Failed to create sender key distribution");
+
+    process_sender_key_distribution(&alice_address, &dist_msg, &mut bob_sender_key_store)
+        .await
+        .expect("Bob failed to process distribution");
+
+    const LIMIT: usize = 2010;
+    let mut ciphertexts = Vec::with_capacity(LIMIT);
+    for _ in 0..LIMIT {
+        ciphertexts.push(
+            encrypt_group_message(
+                &alice_address,
+                distribution_id.clone(),
+                b"too many messages",
+                &mut alice_sender_key_store,
+            )
+            .await
+            .expect("Group encrypt failed"),
+        );
+    }
+
+    let pt_1000 = decrypt_group_message(
+        &alice_address,
+        &ciphertexts[1000],
+        &mut bob_sender_key_store,
+    )
+    .await
+    .expect("Message at index 1000 should decrypt");
+    assert_eq!(pt_1000, b"too many messages");
+
+    let pt_last = decrypt_group_message(
+        &alice_address,
+        &ciphertexts[ciphertexts.len() - 1],
+        &mut bob_sender_key_store,
+    )
+    .await
+    .expect("Last message should decrypt");
+    assert_eq!(pt_last, b"too many messages");
+
+    decrypt_group_message(&alice_address, &ciphertexts[0], &mut bob_sender_key_store)
+        .await
+        .expect_err("Message older than the sender-key window must fail");
+}
+
+// ----------------------------------------------------------------------------
+// (c) Negative signature tests on PreKeyBundle processing
+// ----------------------------------------------------------------------------
+
+/// Mirrors `test_bad_signed_pre_key_signature` (rust/protocol/tests/session.rs:407).
+#[wasm_bindgen_test]
+async fn test_bad_signed_pre_key_signature() {
+    let alice_uuid = "00000000-0000-0000-0000-00000000000A";
+    let bob_uuid = "00000000-0000-0000-0000-00000000000B";
+
+    let (alice_identity, alice_reg_id) = create_test_identity();
+    let mut alice_session_store = WasmInMemSessionStore::new();
+    let mut alice_identity_store = WasmInMemIdentityKeyStore::new(&alice_identity, alice_reg_id);
+    let alice_address = WasmProtocolAddress::new(alice_uuid.to_string(), 1).unwrap();
+
+    let (bob_identity, bob_reg_id) = create_test_identity();
+    let bob_address = WasmProtocolAddress::new(bob_uuid.to_string(), 1).unwrap();
+    let mut bob_signed_prekey_store = WasmInMemSignedPreKeyStore::new();
+    let mut bob_kyber_prekey_store = WasmInMemKyberPreKeyStore::new();
+
+    let bob_spk = generate_signed_pre_key(1, &bob_identity, &mut bob_signed_prekey_store)
+        .await
+        .expect("Failed to generate signed prekey");
+    let bob_kpk = generate_kyber_pre_key(1, &bob_identity, &mut bob_kyber_prekey_store)
+        .await
+        .expect("Failed to generate kyber prekey");
+
+    let bob_identity_pk =
+        WasmPublicKey::deserialize(&bob_identity.public_key().serialize()).unwrap();
+    let signed_prekey_pk = WasmPublicKey::deserialize(&bob_spk.public_key()).unwrap();
+
+    let good_signature = bob_spk.signature();
+
+    for bit in 0..8 * good_signature.len() {
+        let mut bad_signature = good_signature.clone();
+        bad_signature[bit / 8] ^= 0x01u8 << (bit % 8);
+
+        let result = process_pre_key_bundle(
+            &bob_address,
+            &alice_address,
+            bob_reg_id,
+            &bob_identity_pk,
+            bob_spk.id(),
+            &signed_prekey_pk,
+            &bad_signature,
+            None,
+            None,
+            bob_kpk.id(),
+            &bob_kpk.public_key(),
+            &bob_kpk.signature(),
+            &mut alice_session_store,
+            &mut alice_identity_store,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "Corrupted signed-prekey signature bit {bit} must be rejected"
+        );
+    }
+
+    // Non-corrupted signature must be accepted.
+    process_pre_key_bundle(
+        &bob_address,
+        &alice_address,
+        bob_reg_id,
+        &bob_identity_pk,
+        bob_spk.id(),
+        &signed_prekey_pk,
+        &good_signature,
+        None,
+        None,
+        bob_kpk.id(),
+        &bob_kpk.public_key(),
+        &bob_kpk.signature(),
+        &mut alice_session_store,
+        &mut alice_identity_store,
+    )
+    .await
+    .expect("Good signed-prekey signature must be accepted");
+}
+
+/// Negative counterpart for kyber prekey signatures, modelled on
+/// `test_bad_signed_pre_key_signature` (rust/protocol/tests/session.rs:407).
+///
+/// libsignal's PreKeyBundle verifies the kyber prekey signature during
+/// process_prekey_bundle; a corrupted signature is rejected.
+#[wasm_bindgen_test]
+async fn test_bad_kyber_pre_key_signature() {
+    let alice_uuid = "00000000-0000-0000-0000-00000000000A";
+    let bob_uuid = "00000000-0000-0000-0000-00000000000B";
+
+    let (alice_identity, alice_reg_id) = create_test_identity();
+    let mut alice_session_store = WasmInMemSessionStore::new();
+    let mut alice_identity_store = WasmInMemIdentityKeyStore::new(&alice_identity, alice_reg_id);
+    let alice_address = WasmProtocolAddress::new(alice_uuid.to_string(), 1).unwrap();
+
+    let (bob_identity, bob_reg_id) = create_test_identity();
+    let bob_address = WasmProtocolAddress::new(bob_uuid.to_string(), 1).unwrap();
+    let mut bob_signed_prekey_store = WasmInMemSignedPreKeyStore::new();
+    let mut bob_kyber_prekey_store = WasmInMemKyberPreKeyStore::new();
+
+    let bob_spk = generate_signed_pre_key(1, &bob_identity, &mut bob_signed_prekey_store)
+        .await
+        .expect("Failed to generate signed prekey");
+    let bob_kpk = generate_kyber_pre_key(1, &bob_identity, &mut bob_kyber_prekey_store)
+        .await
+        .expect("Failed to generate kyber prekey");
+
+    let bob_identity_pk =
+        WasmPublicKey::deserialize(&bob_identity.public_key().serialize()).unwrap();
+    let signed_prekey_pk = WasmPublicKey::deserialize(&bob_spk.public_key()).unwrap();
+
+    let good_signature = bob_kpk.signature();
+
+    for bit in 0..8 * good_signature.len() {
+        let mut bad_signature = good_signature.clone();
+        bad_signature[bit / 8] ^= 0x01u8 << (bit % 8);
+
+        let result = process_pre_key_bundle(
+            &bob_address,
+            &alice_address,
+            bob_reg_id,
+            &bob_identity_pk,
+            bob_spk.id(),
+            &signed_prekey_pk,
+            &bob_spk.signature(),
+            None,
+            None,
+            bob_kpk.id(),
+            &bob_kpk.public_key(),
+            &bad_signature,
+            &mut alice_session_store,
+            &mut alice_identity_store,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "Corrupted kyber prekey signature bit {bit} must be rejected"
+        );
+    }
+
+    // Non-corrupted signature must be accepted.
+    process_pre_key_bundle(
+        &bob_address,
+        &alice_address,
+        bob_reg_id,
+        &bob_identity_pk,
+        bob_spk.id(),
+        &signed_prekey_pk,
+        &bob_spk.signature(),
+        None,
+        None,
+        bob_kpk.id(),
+        &bob_kpk.public_key(),
+        &good_signature,
+        &mut alice_session_store,
+        &mut alice_identity_store,
+    )
+    .await
+    .expect("Good kyber prekey signature must be accepted");
+}
+
+// ----------------------------------------------------------------------------
+// (d) Straggler decrypt after promote_state
+// ----------------------------------------------------------------------------
+
+/// Mirrors `prekey_message_to_archived_session` (rust/protocol/tests/session.rs:2489).
+///
+/// After Alice establishes a new session with Bob (archiving the old one in the
+/// same record), a late message encrypted under the previous session still
+/// decrypts and promotes the archived state back to current.
+#[wasm_bindgen_test]
+async fn test_straggler_decrypt_after_promote_state() {
+    let alice_uuid = "00000000-0000-0000-0000-00000000000A";
+    let bob_uuid = "00000000-0000-0000-0000-00000000000B";
+
+    // Alice's keys.
+    let (alice_identity, alice_reg_id) = create_test_identity();
+    let mut alice_session_store = WasmInMemSessionStore::new();
+    let mut alice_identity_store = WasmInMemIdentityKeyStore::new(&alice_identity, alice_reg_id);
+    let mut alice_prekey_store = WasmInMemPreKeyStore::new();
+    let mut alice_signed_prekey_store = WasmInMemSignedPreKeyStore::new();
+    let mut alice_kyber_prekey_store = WasmInMemKyberPreKeyStore::new();
+    let alice_address = WasmProtocolAddress::new(alice_uuid.to_string(), 1).unwrap();
+
+    let alice_spk = generate_signed_pre_key(1, &alice_identity, &mut alice_signed_prekey_store)
+        .await
+        .expect("Alice signed prekey");
+    let alice_kpk = generate_kyber_pre_key(1, &alice_identity, &mut alice_kyber_prekey_store)
+        .await
+        .expect("Alice kyber prekey");
+    let alice_prekeys = generate_pre_keys(1, 1, &mut alice_prekey_store)
+        .await
+        .expect("Alice prekeys");
+    let alice_prekey = &alice_prekeys[0];
+
+    // Bob's keys.
+    let (bob_identity, bob_reg_id) = create_test_identity();
+    let mut bob_session_store = WasmInMemSessionStore::new();
+    let mut bob_identity_store = WasmInMemIdentityKeyStore::new(&bob_identity, bob_reg_id);
+    let mut bob_prekey_store = WasmInMemPreKeyStore::new();
+    let mut bob_signed_prekey_store = WasmInMemSignedPreKeyStore::new();
+    let mut bob_kyber_prekey_store = WasmInMemKyberPreKeyStore::new();
+    let bob_address = WasmProtocolAddress::new(bob_uuid.to_string(), 1).unwrap();
+
+    let bob_spk = generate_signed_pre_key(1, &bob_identity, &mut bob_signed_prekey_store)
+        .await
+        .expect("Bob signed prekey");
+    let bob_kpk = generate_kyber_pre_key(1, &bob_identity, &mut bob_kyber_prekey_store)
+        .await
+        .expect("Bob kyber prekey");
+    let bob_prekeys = generate_pre_keys(1, 1, &mut bob_prekey_store)
+        .await
+        .expect("Bob prekeys");
+    let bob_prekey = &bob_prekeys[0];
+
+    let alice_identity_pk =
+        WasmPublicKey::deserialize(&alice_identity.public_key().serialize()).unwrap();
+    let bob_identity_pk =
+        WasmPublicKey::deserialize(&bob_identity.public_key().serialize()).unwrap();
+
+    // Bob processes Alice's bundle and sends the first message.
+    process_pre_key_bundle(
+        &alice_address,
+        &bob_address,
+        alice_reg_id,
+        &alice_identity_pk,
+        alice_spk.id(),
+        &WasmPublicKey::deserialize(&alice_spk.public_key()).unwrap(),
+        &alice_spk.signature(),
+        Some(alice_prekey.id()),
+        Some(alice_prekey.public_key()),
+        alice_kpk.id(),
+        &alice_kpk.public_key(),
+        &alice_kpk.signature(),
+        &mut bob_session_store,
+        &mut bob_identity_store,
+    )
+    .await
+    .expect("Bob failed to process Alice's bundle");
+
+    let bob_ciphertext = encrypt_message(
+        b"from Bob",
+        &alice_address,
+        &bob_address,
+        &mut bob_session_store,
+        &mut bob_identity_store,
+    )
+    .await
+    .expect("Bob first encrypt failed");
+    assert_eq!(bob_ciphertext.message_type(), 3); // PreKeyMessage
+
+    let received_message = decrypt_message(
+        &bob_ciphertext.body(),
+        bob_ciphertext.message_type(),
+        &bob_address,
+        &alice_address,
+        &mut alice_session_store,
+        &mut alice_identity_store,
+        &mut alice_prekey_store,
+        &alice_signed_prekey_store,
+        &mut alice_kyber_prekey_store,
+    )
+    .await
+    .expect("Alice failed to decrypt first message");
+    assert_eq!(received_message.plaintext(), b"from Bob");
+
+    // Alice processes Bob's bundle, establishing a new session and archiving the old one.
+    process_pre_key_bundle(
+        &bob_address,
+        &alice_address,
+        bob_reg_id,
+        &bob_identity_pk,
+        bob_spk.id(),
+        &WasmPublicKey::deserialize(&bob_spk.public_key()).unwrap(),
+        &bob_spk.signature(),
+        Some(bob_prekey.id()),
+        Some(bob_prekey.public_key()),
+        bob_kpk.id(),
+        &bob_kpk.public_key(),
+        &bob_kpk.signature(),
+        &mut alice_session_store,
+        &mut alice_identity_store,
+    )
+    .await
+    .expect("Alice failed to process Bob's bundle");
+
+    // Illustrative message on the new session (not sent).
+    let _unsent_alice_ciphertext = encrypt_message(
+        b"from Alice",
+        &bob_address,
+        &alice_address,
+        &mut alice_session_store,
+        &mut alice_identity_store,
+    )
+    .await
+    .expect("Alice encrypt on new session failed");
+
+    // A late message encrypted under Bob's old session must still decrypt,
+    // promoting the archived session back to current.
+    let bob_ciphertext_2 = encrypt_message(
+        b"from Bob 2",
+        &alice_address,
+        &bob_address,
+        &mut bob_session_store,
+        &mut bob_identity_store,
+    )
+    .await
+    .expect("Bob second encrypt failed");
+
+    let received_message_2 = decrypt_message(
+        &bob_ciphertext_2.body(),
+        bob_ciphertext_2.message_type(),
+        &bob_address,
+        &alice_address,
+        &mut alice_session_store,
+        &mut alice_identity_store,
+        &mut alice_prekey_store,
+        &alice_signed_prekey_store,
+        &mut alice_kyber_prekey_store,
+    )
+    .await
+    .expect("Straggler decrypt after promote_state must succeed");
+    assert_eq!(received_message_2.plaintext(), b"from Bob 2");
 }
