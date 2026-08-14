@@ -1,0 +1,14 @@
+# Pinned compiler — the single most important input to a reproducible build.
+#
+# Upstream (getmaapp/signal-wasm @ 71428b7) had no toolchain pin at all, so
+# "it builds on my laptop" was the only guarantee on offer. With this file,
+# rustup installs exactly this compiler for anyone who checks the tree out,
+# and CI, a contributor's machine, and a release build all agree.
+#
+# Bump deliberately: change the channel, rebuild, and update the expected
+# artifact hash in `build-provenance.json` in the same commit.
+[toolchain]
+channel = "1.97.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
