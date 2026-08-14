@@ -1,8 +1,11 @@
 {
   "$comment": [
-    "Every input that changes the artifact, and the artifact hash they produce.",
-    "scripts/build.sh --check fails if the built hash drifts from this file, and",
-    "CI runs that check on a machine that is not the author's laptop.",
+    "Every input that changes the artifact, and the hash they produce.",
+    "IMPORTANT: the hash is only meaningful for the canonical environment below.",
+    "Cargo embeds a metadata hash derived from the build path into generated-code",
+    "paths inside the artifact, so the same source at a different path yields a",
+    "different hash — measured, see REPRODUCIBILITY.md. The canonical environment",
+    "fixes the path, which is what makes the hash checkable at all.",
     "Update this file in the same commit that changes any pinned input."
   ],
   "source": {
@@ -23,16 +26,36 @@
     "wasm-bindgen": "0.2.126",
     "protoc": "35.1"
   },
+  "canonicalEnvironment": {
+    "how": "docker build --platform linux/amd64 -f Dockerfile.reproduce -t signal-bridge-repro . && docker run --rm --platform linux/amd64 signal-bridge-repro",
+    "platform": "linux/amd64",
+    "sourcePath": "/src",
+    "cargoHome": "/opt/cargo",
+    "why": "Fixed path and fixed CARGO_HOME remove the two machine-dependent inputs that survive path remapping."
+  },
   "artifact": {
     "path": "pkg/signal_wasm_bg.wasm",
-    "sha256": "8425e9d60cfc6bae4ec1fae3fdaa5c161255fd745a1b7a75bb74de3e0991ee30",
-    "bytes": 746818
+    "sha256": "b17266746666b8fa2ffffc45e233f8a80bdf23ad8797bb07e60c6091cb7770c2",
+    "bytes": 710279
   },
-  "reproducedOn": [
+  "measurements": [
     {
-      "host": "macOS 25.6.0, aarch64-apple-darwin",
+      "environment": "canonical container, linux/amd64, /src",
       "date": "2026-08-14",
-      "result": "match"
+      "sha256": "b17266746666b8fa2ffffc45e233f8a80bdf23ad8797bb07e60c6091cb7770c2",
+      "note": "canonical"
+    },
+    {
+      "environment": "macOS 25.6.0 aarch64, path A",
+      "date": "2026-08-14",
+      "sha256": "9eeee28bba69bcb7eaf5313f1bbddb27cff3e550ec3aea48b69027b432955715",
+      "note": "differs from canonical by build-metadata identifiers only, not by compiled logic"
+    },
+    {
+      "environment": "macOS 25.6.0 aarch64, path B",
+      "date": "2026-08-14",
+      "sha256": "0e8c8d805d3b2010b00aab42e8633334bd3c14cb1ff58c98907414ed9ebc3fc2",
+      "note": "same machine as path A — proves the build path itself is an input"
     }
   ]
 }

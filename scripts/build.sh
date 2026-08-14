@@ -75,9 +75,24 @@ echo "host paths: none ✓"
 if [[ "${1:-}" == "--check" ]]; then
   expected="$(python3 -c 'import json;print(json.load(open("build-provenance.json"))["artifact"]["sha256"])')"
   if [[ "$hash" != "$expected" ]]; then
-    echo "FAIL: artifact hash drifted" >&2
+    echo "FAIL: artifact hash does not match build-provenance.json" >&2
     echo "  expected $expected" >&2
     echo "  actual   $hash" >&2
+    echo >&2
+    if [[ "$repo_root" != "/src" ]]; then
+      # Most likely cause, and not a scary one — say so rather than letting
+      # this read as tampering.
+      echo "  You are building at $repo_root, not the canonical /src." >&2
+      echo "  Cargo embeds a path-derived metadata hash into generated-code paths" >&2
+      echo "  inside the artifact, so a different build path gives different bytes." >&2
+      echo "  This is expected and is not evidence of tampering." >&2
+      echo >&2
+      echo "  To check the canonical artifact:" >&2
+      echo "    docker build --platform linux/amd64 -f Dockerfile.reproduce -t signal-bridge-repro ." >&2
+      echo "    docker run --rm --platform linux/amd64 signal-bridge-repro ./scripts/build.sh --check" >&2
+      echo >&2
+      echo "  Details: REPRODUCIBILITY.md" >&2
+    fi
     exit 1
   fi
   echo "hash matches build-provenance.json ✓"
