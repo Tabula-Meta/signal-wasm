@@ -1,0 +1,51 @@
+# Cross-machine reproducibility check.
+#
+# The point of this image is to be as unlike the developer's laptop as
+# possible while still following the repo's own pinned inputs: different OS
+# (Debian vs macOS), different CPU architecture, different CARGO_HOME,
+# different source path. If the artifact hash still matches, the build is
+# reproducible for real and not just repeatable in one home directory.
+#
+#   docker build --platform linux/amd64 -f Dockerfile.reproduce -t signal-bridge-repro .
+#   docker run --rm signal-bridge-repro
+#
+# Note there is no `rust:<version>` base image here on purpose — the toolchain
+# must come from rust-toolchain.toml, so that the file is what is being tested.
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential ca-certificates curl git unzip python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# protoc is pinned, not just installed. libsignal generates Rust from .proto
+# files at build time, so the protoc version is a build INPUT: Debian's stock
+# protobuf-compiler (3.21.12) and protoc 35.1 produce artifacts that differ by
+# ~3 KB. Measured, not assumed — an unpinned protoc was the reason the first
+# cross-machine build did not match.
+ARG PROTOC_VERSION=35.1
+RUN curl -sSLo /tmp/protoc.zip \
+      "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip" \
+    && unzip -q /tmp/protoc.zip -d /usr/local bin/protoc 'include/*' \
+    && rm /tmp/protoc.zip \
+    && chmod +x /usr/local/bin/protoc \
+    && protoc --version
+
+ENV CARGO_HOME=/opt/cargo \
+    RUSTUP_HOME=/opt/rustup \
+    PATH=/opt/cargo/bin:$PATH
+
+# rustup reads rust-toolchain.toml and installs exactly the pinned compiler.
+COPY rust-toolchain.toml /src/rust-toolchain.toml
+WORKDIR /src
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --no-modify-path --default-toolchain none \
+    && rustup show active-toolchain
+
+# wasm-pack pins wasm-opt and the wasm-bindgen CLI, so its version is a build
+# input too and gets the same exact-pin treatment as everything else.
+RUN curl -sSL https://github.com/rustwasm/wasm-pack/releases/download/v0.15.0/wasm-pack-v0.15.0-x86_64-unknown-linux-musl.tar.gz \
+      | tar -xz --strip-components=1 -C /usr/local/bin \
+        wasm-pack-v0.15.0-x86_64-unknown-linux-musl/wasm-pack
+
+COPY . /src
+CMD ["./scripts/build.sh"]

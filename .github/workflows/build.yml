@@ -1,0 +1,82 @@
+name: build
+
+# Upstream had no CI at all — not even a .github directory — so every npm
+# release went out from a laptop, unverified and without provenance. This
+# workflow is the answer to that: it builds on a machine that belongs to
+# nobody, checks the artifact hash against build-provenance.json, and runs the
+# 34 browser tests that upstream shipped but could not execute.
+#
+# The hash check is what makes "reproducible" a claim instead of a hope: a
+# green run means a machine other than the author's produced the exact bytes
+# recorded in the repo.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Pinned, not `-latest`: a silent runner-image bump would change the
+    # artifact and the failure would look like tampering.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      # protoc is a build dependency of libsignal itself (prost-build generates
+      # Rust from .proto at build time). Upstream documented it nowhere, and a
+      # missing protoc fails the build with an error that points at neither.
+      - name: Install pinned protoc
+        run: |
+          version="$(python3 -c 'import json;print(json.load(open("build-provenance.json"))["toolchain"]["protoc"])')"
+          curl -sSLo /tmp/protoc.zip \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${version}/protoc-${version}-linux-x86_64.zip"
+          sudo unzip -qo /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+          sudo chmod +x /usr/local/bin/protoc
+          protoc --version
+
+      # No toolchain is named here on purpose: rust-toolchain.toml is the
+      # authority, so this step also proves that file does its job.
+      - name: Show toolchain
+        run: |
+          rustup show active-toolchain
+          rustc --version
+
+      - name: Install pinned wasm-pack
+        run: |
+          version="$(python3 -c 'import json;print(json.load(open("build-provenance.json"))["toolchain"]["wasm-pack"])')"
+          curl -sSL "https://github.com/rustwasm/wasm-pack/releases/download/v${version}/wasm-pack-v${version}-x86_64-unknown-linux-musl.tar.gz" \
+            | sudo tar -xz --strip-components=1 -C /usr/local/bin \
+                "wasm-pack-v${version}-x86_64-unknown-linux-musl/wasm-pack"
+          wasm-pack --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      # --check fails the run if the artifact hash drifts from the one recorded
+      # in build-provenance.json. It also fails if host paths leaked into the
+      # artifact, which is both a reproducibility break and a privacy leak.
+      - name: Build and verify artifact hash
+        run: ./scripts/build.sh --check
+
+      - name: Install Chrome
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v2
+        with:
+          install-chromedriver: true
+
+      # scripts/test.sh honours a CHROMEDRIVER supplied here rather than letting
+      # wasm-pack download whatever ChromeDriver is newest — the exact mismatch
+      # (driver 152 vs Chrome 151) that kept these 34 tests unrun upstream.
+      - name: Browser tests
+        run: ./scripts/test.sh
+        env:
+          CHROMEDRIVER: ${{ steps.setup-chrome.outputs.chromedriver-path }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signal-wasm-pkg
+          path: pkg/
