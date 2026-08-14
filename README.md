@@ -1,10 +1,18 @@
-# @getmaapp/signal-wasm
+# signal-wasm — Tabula Meta fork
 
 > Signal Protocol compiled to WebAssembly for browser-based E2EE messaging
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![WASM](https://img.shields.io/badge/WASM-Ready-green)](https://webassembly.org/)
-[![Version](https://img.shields.io/badge/Version-0.5.0-blue)](Cargo.toml)
+[![Version](https://img.shields.io/badge/Version-0.6.0-blue)](Cargo.toml)
+
+> **This is a fork** of [`getmaapp/signal-wasm`](https://github.com/getmaapp/signal-wasm)
+> at commit `71428b7`, maintained for [Tabula Meta](https://tabulameta.com).
+> The cryptography is unchanged — it is upstream's, which is in turn
+> [libsignal](https://github.com/signalapp/libsignal)'s. What the fork adds is
+> everything needed to *trust the build*: a pinned compiler, a documented and
+> asserted `protoc`, path-remapped output, CI, and a test suite that actually
+> runs. See [`FORK.md`](FORK.md) for the full list and the reasons.
 
 ## Features
 
@@ -275,26 +283,62 @@ export default defineConfig({
 
 ## Testing
 
-We use `wasm-bindgen-test` for headless browser integration testing.
+34 `#[wasm_bindgen_test]` cases run in a real headless Chrome.
 
 ```bash
-# Run tests in Headless Chrome
-wasm-pack test --headless --chrome
-
-# Run tests in Headless Firefox
-wasm-pack test --headless --firefox
+./scripts/test.sh
 ```
+
+Do **not** use `wasm-pack test --headless --chrome` directly. wasm-pack
+downloads the newest ChromeDriver into its own cache and passes that path to
+cargo, overriding any `CHROMEDRIVER` you set. The moment that driver's major
+version differs from your installed Chrome — measured here: driver 152 against
+Chrome 151 — the run dies with a bare `http status: 404` and a SIGKILLed
+driver, which reads like a broken test harness rather than a version mismatch.
+That is why these tests went unrun for so long. `scripts/test.sh` resolves the
+driver that matches *your* Chrome and invokes the runner directly.
 
 ## Build from Source
 
-```bash
-# Prerequisites
-rustup target add wasm32-unknown-unknown
-cargo install wasm-pack
+### Prerequisites
 
-# Build
-wasm-pack build --target web --scope getmaapp
+| | version | why it is pinned |
+| --- | --- | --- |
+| rustc / cargo | from `rust-toolchain.toml` | rustup installs it for you |
+| wasm-pack | `0.15.0` | it pins `wasm-opt` and the wasm-bindgen CLI |
+| **protoc** | see `build-provenance.json` | **build dependency of libsignal itself** |
+
+⚠️ **`protoc` is required and is not obvious.** libsignal generates Rust from
+`.proto` files during the build (`prost-build`), so without `protoc` the build
+fails partway through with an error that names neither libsignal nor protobuf.
+Install it before your first build:
+
+```bash
+brew install protobuf          # macOS
+apt-get install -y protobuf-compiler   # Debian/Ubuntu (check the version)
 ```
+
+### Build
+
+```bash
+./scripts/build.sh            # build and print the artifact hash
+./scripts/build.sh --check    # additionally fail if the hash drifted
+```
+
+Use the script rather than bare `wasm-pack build`. Rust embeds the absolute
+path of every file it compiles into the binary, so a plain build bakes the
+building machine's home directory into the shipped `.wasm` — we measured
+`/Users/<name>/.cargo/...` throughout the artifact. That makes the build
+unreproducible anywhere else by construction, and ships a developer's username
+to every browser that loads the module. The script sets `--remap-path-prefix`
+to fix both, and then verifies no host paths survived.
+
+## Reproducible builds
+
+`build-provenance.json` records every input that changes the artifact together
+with the hash they produce, and CI rebuilds on a machine that belongs to nobody
+and fails if the hash drifts. See [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md)
+for what is proven, what is not, and the measurements behind both.
 
 ## Security
 
