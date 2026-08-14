@@ -70,6 +70,14 @@ unwrap_used = "warn"
 expect_used = "warn"
 
 [profile.release]
+# Reproducibility: with more than one codegen unit the compiler splits work
+# across threads and the resulting symbol/section ordering can follow the
+# machine rather than the source. Measured on this repo: the same commit and
+# the same rustc 1.97.1 produced different wasm on macOS-aarch64 and
+# Linux-x86_64 *before* wasm-opt ran, which rules out the optimiser and protoc
+# and leaves codegen splitting. One unit costs build time and buys a build that
+# is the same everywhere, which is the whole point of publishing a hash.
+codegen-units = 1
 # Optimise for small binary size
 lto = true
 opt-level = "s"

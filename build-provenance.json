@@ -1,0 +1,38 @@
+{
+  "$comment": [
+    "Every input that changes the artifact, and the artifact hash they produce.",
+    "scripts/build.sh --check fails if the built hash drifts from this file, and",
+    "CI runs that check on a machine that is not the author's laptop.",
+    "Update this file in the same commit that changes any pinned input."
+  ],
+  "source": {
+    "upstream": "https://github.com/getmaapp/signal-wasm",
+    "upstreamCommit": "71428b7d9db2eb034c21a7a76bfad7a17e828c58",
+    "upstreamVersion": "0.6.0",
+    "libsignal": {
+      "repository": "https://github.com/signalapp/libsignal",
+      "rev": "b5121d07c72f9e631f178d907ca892587f64f9e2",
+      "workspaceVersion": "0.97.4"
+    },
+    "license": "AGPL-3.0-only"
+  },
+  "toolchain": {
+    "rustc": "1.97.1",
+    "cargo": "1.97.1",
+    "wasm-pack": "0.15.0",
+    "wasm-bindgen": "0.2.126",
+    "protoc": "35.1"
+  },
+  "artifact": {
+    "path": "pkg/signal_wasm_bg.wasm",
+    "sha256": "8425e9d60cfc6bae4ec1fae3fdaa5c161255fd745a1b7a75bb74de3e0991ee30",
+    "bytes": 746818
+  },
+  "reproducedOn": [
+    {
+      "host": "macOS 25.6.0, aarch64-apple-darwin",
+      "date": "2026-08-14",
+      "result": "match"
+    }
+  ]
+}
