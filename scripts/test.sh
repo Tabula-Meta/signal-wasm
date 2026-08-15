@@ -36,8 +36,11 @@ if [[ -z "${CHROMEDRIVER:-}" ]]; then
   case "$(uname -s)-$(uname -m)" in
     Darwin-arm64) chrome_bin="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"; platform="mac-arm64" ;;
     Darwin-x86_64) chrome_bin="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"; platform="mac-x64" ;;
-    *) chrome_bin="$(command -v google-chrome || command -v chromium || true)"; platform="linux64" ;;
+    *) chrome_bin="$(command -v google-chrome || command -v chromium || command -v chrome || true)"; platform="linux64" ;;
   esac
+
+  # CI installs Chrome somewhere off PATH and knows where it put it.
+  [[ -n "${CHROME_BIN:-}" ]] && chrome_bin="$CHROME_BIN"
 
   if [[ ! -x "$chrome_bin" ]]; then
     echo "FAIL: no Chrome found — install Chrome or set CHROMEDRIVER yourself." >&2

@@ -76,16 +76,18 @@ jobs:
       - name: Install Chrome
         id: setup-chrome
         uses: browser-actions/setup-chrome@v2
-        with:
-          install-chromedriver: true
 
-      # scripts/test.sh honours a CHROMEDRIVER supplied here rather than letting
-      # wasm-pack download whatever ChromeDriver is newest — the exact mismatch
-      # (driver 152 vs Chrome 151) that kept these 34 tests unrun upstream.
+      # Deliberately NOT installing a chromedriver here, and deliberately NOT
+      # setting CHROMEDRIVER. scripts/test.sh exists precisely to resolve the
+      # driver that matches the installed Chrome; handing it one from elsewhere
+      # recreates the version mismatch that kept these 34 tests unrun upstream.
+      # The first CI attempt did exactly that and failed the same way — driver
+      # 152, bare `http status: 404`, SIGKILL. CI now runs the same code path a
+      # developer runs.
       - name: Browser tests
         run: ./scripts/test.sh
         env:
-          CHROMEDRIVER: ${{ steps.setup-chrome.outputs.chromedriver-path }}
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
 
       - uses: actions/upload-artifact@v4
         with:
