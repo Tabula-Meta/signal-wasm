@@ -78,6 +78,42 @@ else:
 fi
 
 echo "==> driver: $("$CHROMEDRIVER" --version)"
+
+# wasm-bindgen-test-runner reads browser capabilities from webdriver.json in
+# the crate root, and says so in its output. Two things have to go in it, and
+# both are invisible failures otherwise:
+#
+#   binary — chromedriver launches whatever `google-chrome` sits on PATH, not
+#     the Chrome we just matched a driver to. On a CI runner Chrome lives in a
+#     tool cache off PATH, so the driver either finds a different version or
+#     nothing at all.
+#   --no-sandbox — Chrome cannot use its sandbox on runners and in containers
+#     and refuses to start.
+#
+# Either failure surfaces the same way: the driver cannot create a session,
+# gets SIGKILLed, and the run dies with a bare `http status: 404`. That single
+# opaque symptom covering several unrelated causes is most of why these tests
+# went unrun for so long.
+#
+# Generated per run rather than committed, so the Chrome path is always this
+# machine's.
+if [[ -n "${chrome_bin:-}" ]]; then
+  python3 - "$chrome_bin" <<'PY'
+import json, sys
+json.dump(
+    {
+        "goog:chromeOptions": {
+            "binary": sys.argv[1],
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+        }
+    },
+    open("webdriver.json", "w"),
+    indent=2,
+)
+PY
+  echo "==> webdriver.json written for $chrome_bin"
+fi
+
 echo "==> tests"
 
 CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="$runner" \

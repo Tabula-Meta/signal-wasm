@@ -30,3 +30,5 @@ yarn-error.log
 
 # libsignal
 libsignal/
+# generated per run by scripts/test.sh (machine-specific Chrome path)
+webdriver.json
