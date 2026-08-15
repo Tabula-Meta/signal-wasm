@@ -6,13 +6,31 @@
 [![WASM](https://img.shields.io/badge/WASM-Ready-green)](https://webassembly.org/)
 [![Version](https://img.shields.io/badge/Version-0.6.0-blue)](Cargo.toml)
 
-> **This is a fork** of [`getmaapp/signal-wasm`](https://github.com/getmaapp/signal-wasm)
-> at commit `71428b7`, maintained for [Tabula Meta](https://tabulameta.com).
-> The cryptography is unchanged — it is upstream's, which is in turn
-> [libsignal](https://github.com/signalapp/libsignal)'s. What the fork adds is
-> everything needed to *trust the build*: a pinned compiler, a documented and
-> asserted `protoc`, path-remapped output, CI, and a test suite that actually
-> runs. See [`FORK.md`](FORK.md) for the full list and the reasons.
+> ### This is a maintained fork, not the original
+>
+> Forked from [`getmaapp/signal-wasm`](https://github.com/getmaapp/signal-wasm)
+> at commit `71428b7`, maintained by [Tabula Meta](https://tabulameta.com) for
+> its Secret Chat feature.
+>
+> **The cryptography is not ours and is unchanged.** It is
+> [libsignal](https://github.com/signalapp/libsignal)'s — Signal Technology
+> Foundation's own implementation — reached through a pinned git dependency. We
+> did not write a single primitive and we do not intend to.
+>
+> **What the fork adds is everything needed to trust the build**: a pinned
+> compiler, a documented and asserted `protoc`, an artifact with no host paths
+> baked into it, CI on a machine that belongs to nobody, and a test suite that
+> actually runs (upstream's 34 tests could not be executed at all).
+>
+> | if you want to know | read |
+> | --- | --- |
+> | why this fork exists and what changed | [`FORK.md`](FORK.md) |
+> | **how to keep it alive — updating libsignal, releases, invariants** | [**`MAINTENANCE.md`**](MAINTENANCE.md) |
+> | what is and is not proven about the build | [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) |
+> | exact pinned inputs and the artifact hash | [`build-provenance.json`](build-provenance.json) |
+>
+> Not affiliated with, endorsed by, or reviewed by Signal Technology Foundation.
+> No external cryptographic audit has been performed.
 
 ## Features
 
