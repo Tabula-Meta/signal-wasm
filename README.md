@@ -9,7 +9,7 @@
 > ### This is a maintained fork, not the original
 >
 > Forked from [`getmaapp/signal-wasm`](https://github.com/getmaapp/signal-wasm)
-> at commit `71428b7`, maintained by [Tabula Meta](https://tabulameta.com) for
+> at commit `71428b7`, maintained by [Tabula Meta](https://tabula-meta.io) for
 > its Secret Chat feature.
 >
 > **The cryptography is not ours and is unchanged.** It is
