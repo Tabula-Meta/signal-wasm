@@ -115,6 +115,25 @@ There is no npm publish. The app consumes the artifact built by CI.
   change. A provenance file that lags is worse than none, because it looks
   authoritative.
 
+## Troubleshooting: `http status: 404` from the test runner
+
+Read this before spending a day on it. **One opaque symptom covers at least
+three unrelated causes**, and that is the single reason upstream's 34 tests
+went unrun. The run prints a bare `Error: http status: 404`, the driver gets
+`SIGKILL`, and nothing says why.
+
+| cause | how to tell | fix |
+| --- | --- | --- |
+| driver/browser major versions differ | compare `chromedriver --version` with your Chrome | `scripts/test.sh` resolves the matching driver — do not hand it a `CHROMEDRIVER` |
+| Chrome cannot use its sandbox (CI, containers) | only fails on CI, works locally | `--no-sandbox`, written into `webdriver.json` by the script |
+| chromedriver launches the wrong Chrome | driver and Chrome versions match and it still fails | `goog:chromeOptions.binary`, written into `webdriver.json` by the script |
+
+All three are handled by `./scripts/test.sh`. If you find a fourth, add a row.
+
+⚠️ `webdriver.json` is **generated per run** and gitignored, because it contains
+this machine's Chrome path. Do not commit it — a committed one can only ever be
+correct on one machine, and being wrong is silent.
+
 ## Known gaps — deliberately open, not forgotten
 
 Measured against [S2C2F](https://github.com/ossf/s2c2f), the OpenSSF-adopted
