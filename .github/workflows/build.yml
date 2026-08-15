@@ -54,6 +54,17 @@ jobs:
                 "wasm-pack-v${version}-x86_64-unknown-linux-musl/wasm-pack"
           wasm-pack --version
 
+      # The test runner must match the wasm-bindgen version in Cargo.lock
+      # exactly. It is not present on the runner, and scripts/test.sh only
+      # knows where wasm-pack caches it locally.
+      - name: Install pinned wasm-bindgen CLI
+        run: |
+          version="$(python3 -c 'import json;print(json.load(open("build-provenance.json"))["toolchain"]["wasm-bindgen"])')"
+          curl -sSL "https://github.com/rustwasm/wasm-bindgen/releases/download/${version}/wasm-bindgen-${version}-x86_64-unknown-linux-musl.tar.gz" \
+            | sudo tar -xz --strip-components=1 -C /usr/local/bin \
+                "wasm-bindgen-${version}-x86_64-unknown-linux-musl/wasm-bindgen-test-runner"
+          wasm-bindgen-test-runner --version
+
       - uses: Swatinem/rust-cache@v2
 
       # --check fails the run if the artifact hash drifts from the one recorded

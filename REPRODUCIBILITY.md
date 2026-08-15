@@ -6,16 +6,24 @@ Measured 2026-08-14. Every number below came from a run, not from reasoning.
 
 | claim | status |
 | --- | --- |
-| the canonical container build reproduces itself, run after run | ✅ verified |
+| **two different machines produce identical bytes on the same host platform** | ✅ **verified** |
 | the artifact contains no host paths or usernames | ✅ verified |
 | the 34 browser tests run and pass | ✅ verified (34/34) |
 | the cryptography is libsignal's, not home-made | ✅ reviewed |
-| **anyone can rebuild these exact bytes anywhere** | ❌ **not true** |
+| the same bytes on a *different host platform* (macOS vs Linux) | ❌ not true |
 | the code has been audited by external cryptographers | ❌ never claimed |
 
-The honest headline: **this build is reproducible in a fixed environment, not
-universally.** That is weaker than "reproducible build" usually implies, and
-saying so is the point of this file.
+The honest headline: **reproducible across machines, per host platform.**
+
+Two independent Linux x86_64 machines — a container on the author's laptop and
+a GitHub Actions runner, with different source paths and different `CARGO_HOME`
+— produced byte-identical artifacts. A macOS aarch64 build does not match them,
+and the reason is understood and documented below (§3).
+
+That is a real supply-chain guarantee: the released artifact can be
+independently rebuilt and checked by anyone on the same platform. It is not the
+absolute "identical everywhere" property, and this file does not pretend
+otherwise.
 
 ## What broke the naive claim
 
@@ -57,52 +65,75 @@ bytes** before wasm-opt even ran, which ruled out both the optimiser and
 hypothesis was wrong, and it is recorded here because a wrong guess that got
 tested is worth more than an untested right one.)
 
-### 3. Cargo's own metadata hash — not fixed, and mostly not fixable here
+### 3. The host platform — the one input that still shows
 
-The remaining bytes are build-metadata identifiers, not compiled logic:
+The remaining difference is build-metadata identifiers, not compiled logic:
 
 - `…/build/spqr-9f0d62e758c8b1fc/out/signal.proto.pq_ratchet.rs` versus
   `spqr-8543afab34bd03ff` — the `spqr` crate generates code through a build
   script, and cargo's metadata hash lands in the generated file's path, which
-  is then embedded. That hash varies with the build path and host triple.
+  is then embedded;
 - `wasm_bindgen_3a35b7f74ba28b95` versus `wasm_bindgen_934f3b78bf77929b` —
-  wasm-bindgen's per-build symbol namespace, derived the same way.
+  wasm-bindgen's per-build symbol namespace, derived the same way;
 - the wasm-bindgen CLI reports `0.2.126 (21ac804a9)` on one platform and
   `0.2.126` on the other — same version, differently built binary.
 
-Cargo's `trim-paths` would address the first two, but it is still nightly-only
-as of Rust 1.97.1, and this project does not build on nightly.
+We first assumed the build **path** drove those hashes, which would have meant
+no two checkouts could ever match. **A later measurement disproved that**: a
+GitHub Actions runner building natively at `/home/runner/work/…` with
+`CARGO_HOME=/home/runner/.cargo` produced bytes identical to a container
+building at `/src` with `CARGO_HOME=/opt/cargo`. Path remapping handles the
+path completely.
 
-## What we do instead
+What is left is the **host triple** — `x86_64-unknown-linux-gnu` versus
+`aarch64-apple-darwin`. Same source, same rustc version, same target
+(`wasm32-unknown-unknown`), but the metadata hash follows the machine doing the
+compiling. Hence: identical within a host platform, different across them.
 
-Fix the environment so those inputs cannot vary: **the canonical build runs in a
-container** with a fixed source path (`/src`), a fixed `CARGO_HOME`
-(`/opt/cargo`), a pinned compiler, a pinned wasm-pack, and a pinned protoc.
+Cargo's `trim-paths` might narrow this further, but it is still nightly-only as
+of Rust 1.97.1, and this project does not build on nightly.
+
+## How to verify the artifact yourself
+
+The canonical platform is **linux/amd64**. On it, a plain checkout and
+`./scripts/build.sh --check` reproduces the recorded hash — no container
+needed:
+
+```bash
+./scripts/build.sh --check
+```
+
+CI does exactly this on every push and fails if the hash drifts from
+`build-provenance.json`.
+
+On any other host (macOS, aarch64), use the container, which supplies a
+linux/amd64 environment:
 
 ```bash
 docker build --platform linux/amd64 -f Dockerfile.reproduce -t signal-bridge-repro .
-docker run --rm --platform linux/amd64 signal-bridge-repro
+docker run --rm --platform linux/amd64 signal-bridge-repro ./scripts/build.sh --check
 ```
 
-Two independent runs of that container produced identical artifacts. CI runs
-the same pinned inputs and fails if the hash drifts from
-`build-provenance.json`.
+Both routes were measured and agree.
 
 ## So what does a green hash check actually mean?
 
-**It means: these bytes came from this source, built by a machine that is not
-the author's laptop, with every input recorded.** That is a real supply-chain
-guarantee, and it is exactly what upstream lacked — every upstream release went
-out from a laptop, unverified, with no provenance attestation.
+**It means: these bytes came from this source, and an independent machine
+reached them from the same source with every input recorded.** Not a claim —
+a measurement, repeated on two unrelated Linux machines with different paths
+and different `CARGO_HOME`.
 
-**It does not mean: you can independently arrive at these bytes on your own
-machine.** You can arrive at them by running the canonical container. Building
-natively will give you a different hash for the reasons above, and that
-difference is not evidence of tampering.
+That is a real supply-chain guarantee, and it is exactly what upstream lacked:
+every upstream release went out from a single laptop, unverified, with no
+provenance attestation.
 
-If someone needs the stronger property, the path is known and finite: wait for
-`trim-paths` to stabilise, or vendor the generated protobuf code so no build
-script writes into a metadata-hashed directory. Neither is done here.
+**What it does not mean:** that a macOS or aarch64 build will match. It will
+not, for the host-triple reason in §3, and that difference is **not** evidence
+of tampering. Verify on linux/amd64, natively or through the container.
+
+If someone needs identity across platforms too, the path is known and finite:
+wait for `trim-paths` to stabilise, or vendor the generated protobuf code so no
+build script writes into a metadata-hashed directory. Neither is done here.
 
 ## What this file does not cover at all
 
